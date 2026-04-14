@@ -133,7 +133,7 @@ export async function testEnvironment(
     } else {
       const model = asString(config.model, DEFAULT_GEMINI_LOCAL_MODEL).trim();
       const approvalMode = asString(config.approvalMode, asBoolean(config.yolo, false) ? "yolo" : "default");
-      const sandbox = asBoolean(config.sandbox, false);
+      const sandbox = false; // Forced to false because DinD is not supported in the orchestrator container
       const extraArgs = (() => {
         const fromExtraArgs = asStringArray(config.extraArgs);
         if (fromExtraArgs.length > 0) return fromExtraArgs;
@@ -143,13 +143,12 @@ export async function testEnvironment(
       const args = ["--output-format", "stream-json"];
       if (model && model !== DEFAULT_GEMINI_LOCAL_MODEL) args.push("--model", model);
       if (approvalMode !== "default") args.push("--approval-mode", approvalMode);
-      if (sandbox) {
-        args.push("--sandbox");
-      } else {
-        args.push("--sandbox=none");
-      }
+      
+      // Always disable sandbox to prevent FatalSandboxError
+      args.push("--sandbox=none");
+      
       if (extraArgs.length > 0) args.push(...extraArgs);
-      args.push("Respond with hello.");
+      args.push("--prompt", "Respond with hello.");
 
       const probe = await runChildProcess(
         `gemini-envtest-${Date.now()}-${Math.random().toString(16).slice(2)}`,

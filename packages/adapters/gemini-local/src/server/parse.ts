@@ -97,9 +97,10 @@ export function parseGeminiJsonl(stdout: string) {
 
     const type = asString(event.type, "").trim();
 
-    if (type === "assistant") {
-      messages.push(...collectMessageText(event.message));
-      const messageObj = parseObject(event.message);
+    if (type === "assistant" || (type === "message" && asString(event.role, "").trim() === "assistant")) {
+      const messagePayload = event.content ?? event.message ?? event;
+      messages.push(...collectMessageText(messagePayload));
+      const messageObj = parseObject(messagePayload);
       const content = Array.isArray(messageObj.content) ? messageObj.content : [];
       for (const partRaw of content) {
         const part = parseObject(partRaw);
