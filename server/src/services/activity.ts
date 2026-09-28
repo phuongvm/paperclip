@@ -1,9 +1,11 @@
+import { executionProjectionsForRuns } from "./execution-projection.js";
 import { and, asc, desc, eq, inArray, isNull, or, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import {
   activityLog,
   agents,
   documentRevisions,
+  documents,
   environmentLeases,
   environments,
   heartbeatRunEvents,
@@ -14,8 +16,9 @@ import {
   issueWorkProducts,
   workspaceOperations,
 } from "@paperclipai/db";
-import { ISSUE_CONTINUATION_SUMMARY_DOCUMENT_KEY } from "@paperclipai/shared";
+import { hasWorkspaceRestoreFailure, safeWorkspaceRestorePath, ISSUE_CONTINUATION_SUMMARY_DOCUMENT_KEY } from "@paperclipai/shared";
 import { logger } from "../middleware/logger.js";
+import { visibleIssueCondition } from "./issue-visibility.js";
 import { classifyRunLiveness } from "./run-liveness.js";
 
 export interface ActivityFilters {
@@ -84,6 +87,14 @@ export function activityService(db: Db) {
     case
       when ${heartbeatRuns.resultJson} is null then null
       else jsonb_strip_nulls(jsonb_build_object(
+        'conversationReset', ${heartbeatRuns.resultJson} -> 'conversationReset',
+        'workspaceRestoreFailure', case when ${heartbeatRuns.resultJson} ->> 'workspaceRestoreFailure'
+          in ('restore_permission_denied', 'restore_lock_timeout', 'restore_unsafe_archive', 'restore_failed')
+          then ${heartbeatRuns.resultJson} -> 'workspaceRestoreFailure' end,
+        'workspaceRestorePath', case when length(${heartbeatRuns.resultJson} ->> 'workspaceRestorePath') <= 180
+          then ${heartbeatRuns.resultJson} -> 'workspaceRestorePath' end,
+        'finalResponseRecorded', case when jsonb_typeof(${heartbeatRuns.resultJson} -> 'finalResponseRecorded') = 'boolean'
+          then ${heartbeatRuns.resultJson} -> 'finalResponseRecorded' end,
         'billingType', coalesce(${heartbeatRuns.resultJson} -> 'billingType', ${heartbeatRuns.resultJson} -> 'billing_type'),
         'billing_type', coalesce(${heartbeatRuns.resultJson} -> 'billing_type', ${heartbeatRuns.resultJson} -> 'billingType'),
         'costUsd', coalesce(
@@ -186,6 +197,7 @@ export function activityService(db: Db) {
         status: issues.status,
         title: issues.title,
         description: issues.description,
+        workMode: issues.workMode,
       })
       .from(issues)
       .where(and(eq(issues.companyId, companyId), eq(issues.id, issueId)))
@@ -354,7 +366,7 @@ export function activityService(db: Db) {
             ...conditions,
             or(
               sql`${activityLog.entityType} != 'issue'`,
-              isNull(issues.hiddenAt),
+              visibleIssueCondition(),
             ),
           ),
         )
@@ -368,9 +380,10 @@ export function activityService(db: Db) {
         .select()
         .from(activityLog)
         .where(
-          and(
-            eq(activityLog.entityType, "issue"),
-            eq(activityLog.entityId, issueId),
+          or(
+            and(eq(activityLog.entityType, "issue"), eq(activityLog.entityId, issueId)),
+            and(or(eq(activityLog.action, "project.created"), eq(activityLog.action, "company.skill_created")), sql`${activityLog.details}->>'sourceIssueId' = ${issueId}`,
+              sql`${activityLog.companyId} = (select company_id from issues where id = ${issueId})`),
           ),
         )
         .orderBy(desc(activityLog.createdAt)),
@@ -380,6 +393,7 @@ export function activityService(db: Db) {
       const runs = await db
         .select({
           runId: heartbeatRuns.id,
+          runtimeMode: heartbeatRuns.runtimeMode,
           status: heartbeatRuns.status,
           agentId: heartbeatRuns.agentId,
           adapterType: agents.adapterType,
@@ -387,6 +401,8 @@ export function activityService(db: Db) {
           finishedAt: heartbeatRuns.finishedAt,
           createdAt: heartbeatRuns.createdAt,
           invocationSource: heartbeatRuns.invocationSource,
+          responsibleUserId: heartbeatRuns.responsibleUserId,
+          errorCode: heartbeatRuns.errorCode,
           usageJson: summarizedUsageJson,
           resultJson: summarizedResultJson,
           logBytes: heartbeatRuns.logBytes,
@@ -399,7 +415,10 @@ export function activityService(db: Db) {
           continuationAttempt: heartbeatRuns.continuationAttempt,
           lastUsefulActionAt: heartbeatRuns.lastUsefulActionAt,
           nextAction: heartbeatRuns.nextAction,
-          contextSnapshot: heartbeatRuns.contextSnapshot,
+          wakeCommentIds: sql<string[] | null>`${heartbeatRuns.contextSnapshot} -> 'wakeCommentIds'`,
+          wakeCommentId: sql<string | null>`${heartbeatRuns.contextSnapshot} ->> 'wakeCommentId'`,
+          contextCommentId: sql<string | null>`${heartbeatRuns.contextSnapshot} ->> 'commentId'`,
+          contextIssueId: sql<string | null>`${heartbeatRuns.contextSnapshot} ->> 'issueId'`,
         })
         .from(heartbeatRuns)
         .innerJoin(
@@ -478,6 +497,17 @@ export function activityService(db: Db) {
         }
       }
 
+      const executionByRunId = await executionProjectionsForRuns(db, companyId, runIds);
+      // Only stored, current plan revisions can support a saved-plan link.
+      // Do not trust an adapter's claim that it wrote a document.
+      const [savedPlan] = runs.some((run) => hasWorkspaceRestoreFailure(run.resultJson))
+        ? await db.select({ revisionId: documentRevisions.id, runId: documentRevisions.createdByRunId })
+          .from(issueDocuments)
+          .innerJoin(documents, and(eq(documents.id, issueDocuments.documentId), eq(documents.companyId, companyId)))
+          .innerJoin(documentRevisions, and(eq(documentRevisions.id, documents.latestRevisionId), eq(documentRevisions.documentId, documents.id), eq(documentRevisions.companyId, companyId)))
+          .where(and(eq(issueDocuments.companyId, companyId), eq(issueDocuments.issueId, issueId), eq(issueDocuments.key, "plan")))
+          .limit(1)
+        : [];
       return runs.map((run) => {
         const leaseRow = leaseByRunId.get(run.runId);
         const leaseMetadata = leaseRow?.lease.metadata ?? null;
@@ -489,6 +519,16 @@ export function activityService(db: Db) {
               : null;
         return {
           ...run,
+          resultJson: run.resultJson ? {
+            ...run.resultJson,
+            ...(Object.hasOwn(run.resultJson, "workspaceRestorePath") ? {
+              workspaceRestorePath: safeWorkspaceRestorePath(run.resultJson.workspaceRestorePath),
+            } : {}),
+            ...(hasWorkspaceRestoreFailure(run.resultJson) ? {
+              ...(savedPlan?.runId === run.runId ? { savedPlanRevisionId: savedPlan.revisionId } : {}),
+            } : {}),
+          } : null,
+          execution: executionByRunId.get(run.runId) ?? null,
           environment: leaseRow
             ? {
                 id: leaseRow.environment.id,
@@ -542,7 +582,7 @@ export function activityService(db: Db) {
             eq(activityLog.companyId, run.companyId),
             eq(activityLog.runId, runId),
             eq(activityLog.entityType, "issue"),
-            isNull(issues.hiddenAt),
+            visibleIssueCondition(),
           ),
         )
         .orderBy(issueIdAsText);
@@ -568,7 +608,7 @@ export function activityService(db: Db) {
           and(
             eq(issues.companyId, run.companyId),
             eq(issues.id, contextIssueId),
-            isNull(issues.hiddenAt),
+            visibleIssueCondition(),
           ),
         )
         .then((rows) => rows[0] ?? null);

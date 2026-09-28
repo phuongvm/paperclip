@@ -7,10 +7,14 @@ import { assetsApi } from "@/api/assets";
 import { useBreadcrumbs } from "../context/BreadcrumbContext";
 import { useCompany } from "../context/CompanyContext";
 import { queryKeys } from "../lib/queryKeys";
+import { InboxAgentPolicyControl } from "@/components/InboxAgentPolicyControl";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
+import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { ToggleSwitch } from "@/components/ui/toggle-switch";
+import { useUserPreferences } from "../hooks/useUserPreferences";
 
 function deriveInitials(name: string) {
   const parts = name.trim().split(/\s+/).filter(Boolean);
@@ -22,6 +26,7 @@ export function ProfileSettings() {
   const { setBreadcrumbs } = useBreadcrumbs();
   const { selectedCompanyId, selectedCompany } = useCompany();
   const queryClient = useQueryClient();
+  const preferencesQuery = useUserPreferences();
   const avatarInputId = useId();
   const avatarInputRef = useRef<HTMLInputElement | null>(null);
   const [name, setName] = useState("");
@@ -32,10 +37,17 @@ export function ProfileSettings() {
     queryFn: () => authApi.getSession(),
     retry: false,
   });
+  const updatePreferencesMutation = useMutation({
+    mutationFn: authApi.updatePreferences,
+    onMutate: () => sessionQuery.data?.user.id ?? null,
+    onSuccess: (preferences, _input, userId) => {
+      queryClient.setQueryData(queryKeys.auth.preferences(userId), preferences);
+    },
+  });
 
   useEffect(() => {
     setBreadcrumbs([
-      { label: "Instance Settings" },
+      { label: "Settings", href: "/company/settings" },
       { label: "Profile" },
     ]);
   }, [setBreadcrumbs]);
@@ -85,7 +97,7 @@ export function ProfileSettings() {
   const uploadAvatarMutation = useMutation({
     mutationFn: async (file: File) => {
       if (!selectedCompanyId) {
-        throw new Error("Select a company before uploading a profile avatar.");
+        throw new Error("Select an organization before uploading a profile avatar.");
       }
 
       const asset = await assetsApi.uploadImage(
@@ -135,10 +147,10 @@ export function ProfileSettings() {
   const isSavingProfile = updateMutation.isPending || uploadAvatarMutation.isPending || removeAvatarMutation.isPending;
   const uploadHint = selectedCompany
     ? `Stored in Paperclip file storage for ${selectedCompany.name}.`
-    : "Select a company to upload an avatar into Paperclip storage.";
+    : "Select an organization to upload an avatar into Paperclip storage.";
 
   return (
-    <div className="max-w-4xl space-y-6">
+    <div className="max-w-6xl space-y-6">
       <div className="space-y-2">
         <div className="flex items-center gap-2">
           <UserRoundPen className="h-5 w-5 text-muted-foreground" />
@@ -156,11 +168,11 @@ export function ProfileSettings() {
       ) : null}
 
       <section className="space-y-8">
-        <div className="relative overflow-hidden rounded-[28px] border border-border/70 bg-card shadow-sm">
-          <div className="absolute inset-x-0 top-0 h-32 bg-[linear-gradient(135deg,hsl(var(--primary))_0%,hsl(var(--accent))_58%,color-mix(in_oklab,hsl(var(--background))_76%,white_24%)_100%)]" />
-          <div className="absolute inset-0 bg-[radial-gradient(circle_at_top_right,rgba(255,255,255,0.22),transparent_34%),radial-gradient(circle_at_bottom_left,rgba(255,255,255,0.08),transparent_36%)]" />
+        <Card className="block relative overflow-hidden rounded-(--rad-28) border-border/70">
+          <div className="absolute inset-x-0 top-0 h-32 bg-(image:--gradient-extract-26)" />
+          <div className="absolute inset-0 bg-(image:--gradient-extract-7)" />
           <div className="relative p-6 pt-10">
-            <div className="flex flex-wrap items-end gap-5 rounded-[24px] border border-border/70 bg-background/92 p-5 shadow-[0_18px_44px_-28px_rgba(0,0,0,0.45)] backdrop-blur-sm">
+            <div className="flex flex-wrap items-end gap-5 rounded-(--rad-24) border border-border/70 bg-background/92 p-5 shadow-(--shadow-extract-18) backdrop-blur-sm">
               <div className="space-y-3">
                 <label
                   htmlFor={avatarInputId}
@@ -224,7 +236,7 @@ export function ProfileSettings() {
               </div>
             </div>
           </div>
-        </div>
+        </Card>
 
         <form
           className="grid gap-6 md:grid-cols-2"
@@ -267,6 +279,33 @@ export function ProfileSettings() {
             </Button>
           </div>
         </form>
+
+        <section>
+          <div className="flex items-start justify-between gap-4">
+            <div className="space-y-1.5">
+              <h2 className="text-sm font-semibold">Keyboard shortcuts</h2>
+              <p className="max-w-2xl text-sm text-muted-foreground">
+                Enable app keyboard shortcuts, including inbox navigation and global shortcuts like creating tasks or
+                toggling panels. This applies only to your account, across all organizations and devices. Off by default.
+              </p>
+            </div>
+            <ToggleSwitch
+              checked={preferencesQuery.data?.keyboardShortcuts === true}
+              onCheckedChange={(keyboardShortcuts) => {
+                if (selectedCompanyId && sessionQuery.data?.user.id) updatePreferencesMutation.mutate({ companyId: selectedCompanyId, keyboardShortcuts, expectedUserId: sessionQuery.data.user.id });
+              }}
+              disabled={!selectedCompanyId || !preferencesQuery.data || preferencesQuery.isError || updatePreferencesMutation.isPending}
+              aria-label="Toggle keyboard shortcuts"
+            />
+          </div>
+          {preferencesQuery.error || updatePreferencesMutation.error ? (
+            <p role="alert" className="text-sm text-destructive">
+              {(updatePreferencesMutation.error ?? preferencesQuery.error)?.message}
+            </p>
+          ) : null}
+        </section>
+
+        <InboxAgentPolicyControl companyId={selectedCompanyId} />
       </section>
     </div>
   );

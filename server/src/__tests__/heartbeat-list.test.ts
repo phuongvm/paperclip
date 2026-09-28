@@ -145,6 +145,85 @@ describeEmbeddedPostgres("heartbeat list", () => {
     });
   });
 
+  it("returns summary list rows without heavy run detail fields", async () => {
+    const companyId = randomUUID();
+    const agentId = randomUUID();
+    const issueId = randomUUID();
+    const runId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+
+    await db.insert(agents).values({
+      id: agentId,
+      companyId,
+      name: "CodexCoder",
+      role: "engineer",
+      status: "running",
+      adapterType: "codex_local",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+    });
+
+    await db.insert(heartbeatRuns).values({
+      id: runId,
+      companyId,
+      agentId,
+      invocationSource: "assignment",
+      status: "failed",
+      error: "Failed after doing useful work",
+      usageJson: {
+        provider: "openai",
+        model: "gpt-5",
+        inputTokens: 123,
+      },
+      resultJson: {
+        summary: "large run summary",
+        stdout: "x".repeat(20_000),
+      },
+      sessionIdBefore: "session-before",
+      sessionIdAfter: "session-after",
+      logStore: "local",
+      logRef: "logs/run.log",
+      logSha256: "abc123",
+      externalRunId: "external-run",
+      processPid: 12345,
+      contextSnapshot: {
+        issueId,
+        wakeReason: "issue_assigned",
+      },
+    });
+
+    const runs = await heartbeatService(db).list(companyId, undefined, 5, { summary: true });
+
+    expect(runs).toHaveLength(1);
+    expect(runs[0]).toMatchObject({
+      id: runId,
+      companyId,
+      agentId,
+      status: "failed",
+      error: "Failed after doing useful work",
+      usageJson: null,
+      resultJson: null,
+      sessionIdBefore: null,
+      sessionIdAfter: null,
+      logStore: null,
+      logRef: null,
+      logSha256: null,
+      externalRunId: null,
+      processPid: null,
+      contextSnapshot: {
+        issueId,
+        wakeReason: "issue_assigned",
+      },
+    });
+  });
+
   it("bounds oversized legacy result json payloads on getRun", async () => {
     const companyId = randomUUID();
     const agentId = randomUUID();
@@ -185,6 +264,9 @@ describeEmbeddedPostgres("heartbeat list", () => {
         summary: "completed",
         stdout: oversizedStdout,
         nestedHuge: { payload: oversizedNestedPayload },
+        workspaceRestoreFailure: "restore_unsafe_archive",
+        finalResponseRecorded: true,
+        executionBeforeRestore: { errorCode: "model_error", exitCode: 2, timedOut: false },
       },
     });
 
@@ -196,6 +278,9 @@ describeEmbeddedPostgres("heartbeat list", () => {
       truncated: true,
       truncationReason: "oversized_result_json",
       stdoutTruncated: true,
+      workspaceRestoreFailure: "restore_unsafe_archive",
+      finalResponseRecorded: true,
+      executionBeforeRestore: { errorCode: "model_error", exitCode: 2, timedOut: false },
     });
     expect(typeof result?.stdout).toBe("string");
     expect((result?.stdout as string).length).toBeLessThan(oversizedStdout.length);
