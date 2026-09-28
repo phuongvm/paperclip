@@ -8,7 +8,7 @@
 // plugin's own package.json so the published tarballs cannot carry a lifecycle
 // script that escapes their package directory at install time.
 
-import { existsSync, lstatSync, mkdirSync, readdirSync, readlinkSync, rmSync, symlinkSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readdirSync, readlinkSync, symlinkSync, unlinkSync } from "node:fs";
 import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -78,11 +78,13 @@ export function linkSdkInto(packageDir) {
   try {
     const stat = lstatSync(linkTarget);
     if (stat.isSymbolicLink()) {
-      if (readlinkSync(linkTarget) === relativeSdkDir) {
+      // Junctions (Windows fallback below) read back as absolute paths.
+      if (resolve(scopeDir, readlinkSync(linkTarget)) === sdkDir) {
         // Already linked to the in-repo SDK; nothing to do.
         return false;
       }
-      rmSync(linkTarget, { force: true });
+      // unlink removes only the link; rmSync fails on Windows directory links.
+      unlinkSync(linkTarget);
     } else {
       // A real install has already populated @paperclipai/plugin-sdk (e.g. the
       // plugin host did `npm install` of the published tarball). Leave it.
@@ -93,6 +95,13 @@ export function linkSdkInto(packageDir) {
     if (error?.code !== "ENOENT") throw error;
   }
 
-  symlinkSync(relativeSdkDir, linkTarget, "dir");
+  try {
+    symlinkSync(relativeSdkDir, linkTarget, "dir");
+  } catch (error) {
+    // Windows without admin/Developer Mode rejects directory symlinks; an NTFS
+    // junction needs no privilege and resolves the same way for Node.
+    if (process.platform !== "win32" || error?.code !== "EPERM") throw error;
+    symlinkSync(sdkDir, linkTarget, "junction");
+  }
   return true;
 }
