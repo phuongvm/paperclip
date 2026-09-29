@@ -1,3 +1,14 @@
+import { isAgentDirectoryCopy } from "./agent-directory-working-copies.js";
+
+import type { PaperclipTurnContext } from "@paperclipai/adapter-utils/server-utils";
+import { restoreNativeWorkspaceBestEffort } from "./native-runtime/native-workspace-best-effort.js";
+import {
+  withNativeWorkspaceFinalizationOwnership,
+  NativeWorkspaceFinalizationBusyError,
+  NativeWorkspaceFinalizationOwnershipLostError,
+  type NativeWorkspaceFinalizationOwnership,
+} from "./native-runtime/native-workspace-finalization-ownership.js";
+import { hasStopOnlyCleanup, settleStopOnlyCleanup } from "./sandbox-stop-and-retain.js";
 import { applyWorkspaceRestoreFailure } from "@paperclipai/adapter-utils/workspace-restore-result";
 import { hasWorkspaceRestoreFailure } from "@paperclipai/shared";
 import { externalConversationStateSql, nonIdleSlackIssueCondition } from "./slack-conversation-state.js";
@@ -58,6 +69,7 @@ import {
   startAdapterExecutionTargetPaperclipBridge,
 } from "@paperclipai/adapter-utils/execution-target";
 import { agentService } from "./agents.js";
+import { agentInstructionWorkingCopyService, instructionWorkingCopyGuidance } from "./agent-instruction-working-copies.js";
 import { normalizeLegacyRunnerProvider } from "@paperclipai/adapter-utils";
 import fs from "node:fs/promises";
 import path from "node:path";
@@ -221,7 +233,9 @@ import {
   isRunnerIngressAuthorized,
   materializeLegacyQuestionResponseWakeProjection,
   materializeNativeInteractionResponses,
-  nativeCompletionRequestsForComments,
+  nativeCompletionRequestsWithSources,
+  nativeCompletionSource,
+  nativeImmediateObjectiveSource,
   NativeCancellationPendingRecoveryError,
   NativeControllerDetachedForRestartError,
   nativeToolContractFingerprintForTarget,
@@ -239,6 +253,7 @@ import {
 import {
   assertAgentCoreProfileRecoveryBinding,
   assertManagedProfileRecoveryBinding,
+  projectPaperclipRunnerTaskConfig,
   resolvePaperclipRunnerNativeProviderInput,
 } from "./native-runtime/provider-profile.js";
 import {
@@ -329,6 +344,7 @@ import {
   readCompletedAssistantMessageCandidate,
   resolveHeartbeatRunResponse,
   selectHeartbeatRunFinalAgentMessage,
+  summarizeRunErrorForModel,
   type RunPresentationDecision,
 } from "./heartbeat-run-summary.js";
 import {
@@ -3297,6 +3313,7 @@ const heartbeatRunProcessGroupIdColumn =
 
 const heartbeatRunListColumns = {
   id: heartbeatRuns.id,
+  responsibleUserId: heartbeatRuns.responsibleUserId,
   companyId: heartbeatRuns.companyId,
   agentId: heartbeatRuns.agentId,
   invocationSource: heartbeatRuns.invocationSource,
@@ -3418,6 +3435,18 @@ const heartbeatRunListResultColumns = {
   >`${heartbeatRuns.resultJson} ->> 'costUsd'`.as("resultCostUsdCamel"),
 } as const;
 
+// Reserve at most 9 KiB for diagnostics in the reduced result. An oversized
+// multibyte field uses a conservative four-byte-per-character prefix, with a
+// visible pointer to the full (adapter-bounded) run error and transcript.
+const diagnosticRetrievalTitleBytes = 1024;
+const diagnosticRetrievalDetailsBytes = 8192;
+function boundedRunDiagnosticText(field: "title" | "details", maxBytes: number) {
+  const value = sql`${heartbeatRuns.resultJson} #>> ARRAY['terminalSessionFailure', ${field}]`;
+  return sql`case when octet_length(${value}) <= ${maxBytes} then ${value}
+    else left(${value}, ${Math.floor((maxBytes - 100) / 4)})
+      || E'\\n[truncated for run retrieval; full text in run error/transcript]' end`;
+}
+
 const heartbeatRunSafeResultJsonColumn = sql<Record<string, unknown> | null>`
   case
     when ${heartbeatRuns.resultJson} is null then null
@@ -3431,6 +3460,28 @@ const heartbeatRunSafeResultJsonColumn = sql<Record<string, unknown> | null>`
         'error', left(${heartbeatRuns.resultJson} ->> 'error', ${HEARTBEAT_RUN_RESULT_SUMMARY_MAX_CHARS}),
         'stdout', left(${heartbeatRuns.resultJson} ->> 'stdout', ${HEARTBEAT_RUN_RESULT_OUTPUT_MAX_CHARS}),
         'stderr', left(${heartbeatRuns.resultJson} ->> 'stderr', ${HEARTBEAT_RUN_RESULT_OUTPUT_MAX_CHARS}),
+        'terminalSessionFailure', case when jsonb_typeof(${heartbeatRuns.resultJson} -> 'terminalSessionFailure') = 'object'
+          then jsonb_strip_nulls(jsonb_build_object(
+            'category', left(${heartbeatRuns.resultJson} #>> '{terminalSessionFailure,category}', 32),
+            'title', ${boundedRunDiagnosticText("title", diagnosticRetrievalTitleBytes)},
+            'details', ${boundedRunDiagnosticText("details", diagnosticRetrievalDetailsBytes)},
+            'retrievalTruncated', case when
+              octet_length(${heartbeatRuns.resultJson} #>> '{terminalSessionFailure,title}') > ${diagnosticRetrievalTitleBytes}
+              or octet_length(${heartbeatRuns.resultJson} #>> '{terminalSessionFailure,details}') > ${diagnosticRetrievalDetailsBytes}
+              then to_jsonb(true) end,
+            'truncatedFields', case when ${heartbeatRuns.resultJson} #> '{terminalSessionFailure,truncatedFields}'
+              in ('["title"]'::jsonb, '["details"]'::jsonb, '["title","details"]'::jsonb)
+              then ${heartbeatRuns.resultJson} #> '{terminalSessionFailure,truncatedFields}' end
+          )) end,
+        'instructionSave', case when jsonb_typeof(${heartbeatRuns.resultJson} -> 'instructionSave') = 'object'
+          then jsonb_strip_nulls(jsonb_build_object(
+            'state', left(${heartbeatRuns.resultJson} #>> '{instructionSave,state}', 32),
+            'contract', left(${heartbeatRuns.resultJson} #>> '{instructionSave,contract}', 32),
+            'entryFile', left(${heartbeatRuns.resultJson} #>> '{instructionSave,entryFile}', 512),
+            'errorCode', left(${heartbeatRuns.resultJson} #>> '{instructionSave,errorCode}', 128),
+            'errorMessage', left(${heartbeatRuns.resultJson} #>> '{instructionSave,errorMessage}', 1024),
+            'storageWarning', left(${heartbeatRuns.resultJson} #>> '{instructionSave,storageWarning}', 1024)
+          )) end,
         'workspaceRestoreFailure', case when ${heartbeatRuns.resultJson} ->> 'workspaceRestoreFailure'
           in ('restore_permission_denied', 'restore_lock_timeout', 'restore_unsafe_archive', 'restore_failed')
           then ${heartbeatRuns.resultJson} -> 'workspaceRestoreFailure' end,
@@ -5227,11 +5278,13 @@ export function resolveLedgerCostStatus(input: {
   cachedInputTokens: number;
   outputTokens: number;
 }): CostStatus {
-  const hasTokenUsage =
-    input.inputTokens > 0 ||
-    input.cachedInputTokens > 0 ||
-    input.outputTokens > 0;
-  return input.costUsd == null && hasTokenUsage ? "unpriced" : "reported";
+  // A paused turn can have neither a token receipt nor a cost receipt. Zero
+  // normalized counters do not establish that its billed cost was zero.
+  return typeof input.costUsd === "number" &&
+    Number.isFinite(input.costUsd) &&
+    input.costUsd >= 0
+    ? "reported"
+    : "unpriced";
 }
 
 export function resolveCacheAdjustedCostUsd(input: {
@@ -8575,6 +8628,9 @@ export function buildPaperclipTaskMarkdown(input: {
   // false builds the compact variant used for resume deltas, where the session
   // already received the description with the assignment.
   includeDescription?: boolean;
+  // Current wake events are rendered by the structured wake prompt on
+  // adapter lanes. Keep the legacy default for standalone callers.
+  includeWakeComments?: boolean;
 }) {
   const quoteTaskScalar = (value: string) => JSON.stringify(value);
   const fenceTaskText = (value: string) => {
@@ -8600,6 +8656,7 @@ export function buildPaperclipTaskMarkdown(input: {
       : null);
   const effectiveWakeComments =
     wakeComments.length > 0 ? wakeComments : wakeComment ? [wakeComment] : [];
+  const renderWakeCommentBodies = input.includeWakeComments !== false;
   const rejectedPlan = input.planReview?.status === "rejected";
   const acceptedPlanContinuation =
     !rejectedPlan && !issue?.conversationAgentId && !wakeComment &&
@@ -8800,7 +8857,9 @@ export function buildPaperclipTaskMarkdown(input: {
       "Apply the latest wake comment to the current task. Later direction replaces conflicting scope; preserve other requirements and approval gates. Clarification is not approval. Reuse completed work rather than repeating it.",
       "",
       "Latest wake comment:",
-      fenceTaskText(effectiveWakeComments[0]!.body),
+      ...(renderWakeCommentBodies
+        ? [fenceTaskText(effectiveWakeComments[0]!.body)]
+        : []),
     );
     appendWakeAttachments(effectiveWakeComments[0]!);
   } else if (effectiveWakeComments.length > 1) {
@@ -8815,7 +8874,7 @@ export function buildPaperclipTaskMarkdown(input: {
       lines.push(
         "",
         `Wake comment ${index + 1} (${quoteTaskScalar(comment.id)}):`,
-        fenceTaskText(comment.body),
+        ...(renderWakeCommentBodies ? [fenceTaskText(comment.body)] : []),
       );
       appendWakeAttachments(comment);
     }
@@ -9483,6 +9542,7 @@ export function heartbeatService(
     environmentRuntimeService(db, {
       pluginWorkerManager: options.pluginWorkerManager,
     });
+  const instructionCopies = agentInstructionWorkingCopyService(db, { environmentRuntime });
   const envOrchestrator = environmentRunOrchestrator(db, {
     pluginWorkerManager: options.pluginWorkerManager,
     environmentRuntime,
@@ -12022,6 +12082,9 @@ export function heartbeatService(
         createdAt: heartbeatRuns.createdAt,
         usageJson: heartbeatRuns.usageJson,
         error: heartbeatRuns.error,
+        terminalFailureCategory: sql<string | null>`case
+          when jsonb_typeof(${heartbeatRuns.resultJson} -> 'terminalSessionFailure') = 'object'
+          then coalesce(left(${heartbeatRuns.resultJson} #>> '{terminalSessionFailure,category}', 32), 'unknown') end`,
         ...heartbeatRunListResultColumns,
       })
       .from(heartbeatRuns)
@@ -12099,7 +12162,7 @@ export function heartbeatService(
       readNonEmptyString(latestSummary?.summary) ??
       readNonEmptyString(latestSummary?.result) ??
       readNonEmptyString(latestSummary?.message) ??
-      readNonEmptyString(latestRun.error);
+      readNonEmptyString(summarizeRunErrorForModel(latestRun.error, latestRun.terminalFailureCategory));
 
     const handoffMarkdown = [
       "Paperclip session handoff:",
@@ -18573,7 +18636,7 @@ export function heartbeatService(
       // path uses the provider and configuration recorded on the lease first;
       // the environment is lifecycle context and only a legacy fallback.
       const isOrphanEphemeralLease = lease.leasePolicy === "ephemeral";
-      const useRecordedTeardown = isOrphanEphemeralLease || !environment;
+      const useRecordedTeardown = isOrphanEphemeralLease || !environment || hasStopOnlyCleanup(lease);
 
       // Do not consume a finite cleanup attempt while the provider plugin is
       // briefly unavailable. A plugin worker restart, a plugin reload, or a
@@ -18642,7 +18705,9 @@ export function heartbeatService(
             environment,
             lease,
           });
-          const released = await environmentsSvc.releaseLease(lease.id, "expired", {
+          const released = hasStopOnlyCleanup(lease)
+            ? await settleStopOnlyCleanup(db, lease, { attemptId: claimed, receipt })
+            : await environmentsSvc.releaseLease(lease.id, "expired", {
             expectedPendingCleanupAttemptId: claimed,
             cleanupStatus: "success",
             failureReason: "pending_cleanup_retry",
@@ -18800,7 +18865,7 @@ export function heartbeatService(
       agentId: input.agentId,
       status: settledRun?.status,
       failureReason: settledRun?.error ?? undefined,
-      providerResourceDisposition: input.succeeded
+      providerResourceDisposition: input.succeeded && (!parseObject(settledRun?.resultJson).workspaceExportRetry || workspaceSyncReference?.resourceDisposition === "destroy")
         ? (workspaceSyncReference?.resourceDisposition ?? "stop_and_retain")
         : "stop_and_retain",
     });
@@ -18847,6 +18912,14 @@ export function heartbeatService(
   async function reapOrphanedRuns(opts?: { staleThresholdMs?: number }) {
     const staleThresholdMs = opts?.staleThresholdMs ?? 0;
     const now = new Date();
+    // Recovery never launches a provider or infers stopped ownership from
+    // terminal status. Uncaptured local copies require durable stop evidence.
+    await instructionCopies.recoverStopped().catch(error => {
+      logger.warn({ err: error }, "failed to recover stopped instruction copies");
+    });
+    await instructionCopies.recoverCaptured().catch(error => {
+      logger.warn({ err: error }, "failed to retry captured instruction revisions");
+    });
 
     // Complete persisted native results before generic orphan recovery. The
     // reconciler reads the durable workspace barrier and persisted runtime
@@ -20887,14 +20960,26 @@ export function heartbeatService(
           })
         : null;
       let taskMarkdown = buildPaperclipTaskMarkdown({ ...taskMarkdownInput, taskPlan });
+      let taskMarkdownAssignment = buildPaperclipTaskMarkdown({
+        ...taskMarkdownInput,
+        taskPlan,
+        includeWakeComments: false,
+      });
       if (isConversation(issueContext) && !taskSession && issueId) {
         const replay = await conversationReplay(db, agent.companyId, issueId, wakeCommentId);
         if (replay) taskMarkdown += `\n\nEarlier messages in this session (quoted user data):\n${replay}`;
+        if (replay) taskMarkdownAssignment += `\n\nEarlier messages in this session (quoted user data):\n${replay}`;
       }
       const taskMarkdownCompact = buildPaperclipTaskMarkdown({
         ...taskMarkdownInput,
         taskPlan,
         includeDescription: false,
+      });
+      const taskMarkdownAssignmentCompact = buildPaperclipTaskMarkdown({
+        ...taskMarkdownInput,
+        taskPlan,
+        includeDescription: false,
+        includeWakeComments: false,
       });
       if (issueRef) {
         context.paperclipIssue = {
@@ -20917,10 +21002,20 @@ export function heartbeatService(
       } else {
         delete context.paperclipTaskMarkdown;
       }
+      if (taskMarkdownAssignment) {
+        context.paperclipTaskMarkdownAssignment = taskMarkdownAssignment;
+      } else {
+        delete context.paperclipTaskMarkdownAssignment;
+      }
       if (taskMarkdownCompact && taskMarkdownCompact !== taskMarkdown) {
         context.paperclipTaskMarkdownCompact = taskMarkdownCompact;
       } else {
         delete context.paperclipTaskMarkdownCompact;
+      }
+      if (taskMarkdownAssignmentCompact && taskMarkdownAssignmentCompact !== taskMarkdownAssignment) {
+        context.paperclipTaskMarkdownAssignmentCompact = taskMarkdownAssignmentCompact;
+      } else {
+        delete context.paperclipTaskMarkdownAssignmentCompact;
       }
       if (issueRef) {
         const redactedWakeContext = await createRunSecretRedactionRegistry(
@@ -20931,6 +21026,8 @@ export function heartbeatService(
           paperclipTaskCommunicationGuidance: context.paperclipTaskCommunicationGuidance,
           paperclipTaskMarkdown: context.paperclipTaskMarkdown,
           paperclipTaskMarkdownCompact: context.paperclipTaskMarkdownCompact,
+          paperclipTaskMarkdownAssignment: context.paperclipTaskMarkdownAssignment,
+          paperclipTaskMarkdownAssignmentCompact: context.paperclipTaskMarkdownAssignmentCompact,
         });
         context.paperclipIssue = redactedWakeContext.paperclipIssue;
         context.paperclipTaskCommunicationGuidance = redactedWakeContext.paperclipTaskCommunicationGuidance;
@@ -20946,6 +21043,42 @@ export function heartbeatService(
           context.paperclipTaskMarkdownCompact =
             redactedWakeContext.paperclipTaskMarkdownCompact;
         }
+        if (redactedWakeContext.paperclipTaskMarkdownAssignment) {
+          context.paperclipTaskMarkdownAssignment =
+            redactedWakeContext.paperclipTaskMarkdownAssignment;
+        }
+        if (redactedWakeContext.paperclipTaskMarkdownAssignmentCompact) {
+          context.paperclipTaskMarkdownAssignmentCompact =
+            redactedWakeContext.paperclipTaskMarkdownAssignmentCompact;
+        }
+      }
+      if (issueRef) {
+        const digest = (value: string | null | undefined) =>
+          value?.trim()
+            ? createHash("sha256")
+                .update(value.trim().replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, ""))
+                .digest("hex")
+            : null;
+        const redactedIssue = parseObject(context.paperclipIssue);
+        context.paperclipTurnContext = {
+          version: 1,
+          assignment: {
+            owner: "task_markdown",
+            description: {
+              id: issueRef.id,
+              revision: digest(readNonEmptyString(redactedIssue.description)),
+            },
+          },
+          events: {
+            owner: "wake_prompt",
+            comments: safeWakeComments.map((comment) => ({
+              id: comment.id,
+              revision: digest(comment.body),
+            })),
+          },
+        } satisfies PaperclipTurnContext;
+      } else {
+        delete context.paperclipTurnContext;
       }
       // A native run's execution input is immutable once persisted. Recovery must therefore
       // restore the workspace bound to that input rather than consulting the issue's current
@@ -21199,10 +21332,19 @@ export function heartbeatService(
           context.paperclipTaskMarkdown = appendConcurrentWorkspaceNote(
             context.paperclipTaskMarkdown,
           );
+          context.paperclipTaskMarkdownAssignment = appendConcurrentWorkspaceNote(
+            context.paperclipTaskMarkdownAssignment,
+          );
           if (typeof context.paperclipTaskMarkdownCompact === "string") {
             context.paperclipTaskMarkdownCompact =
               appendConcurrentWorkspaceNote(
                 context.paperclipTaskMarkdownCompact,
+              );
+          }
+          if (typeof context.paperclipTaskMarkdownAssignmentCompact === "string") {
+            context.paperclipTaskMarkdownAssignmentCompact =
+              appendConcurrentWorkspaceNote(
+                context.paperclipTaskMarkdownAssignmentCompact,
               );
           }
           logger.info(
@@ -22260,6 +22402,29 @@ export function heartbeatService(
       await bindIssueToPersistedExecutionWorkspace(persistedExecutionWorkspace);
       const workspaceRealization = realizationResult.workspaceRealization;
       const executionTarget = realizationResult.executionTarget;
+      let instructionCopy: Awaited<ReturnType<typeof instructionCopies.prepare>> = null;
+      let instructionSave: Record<string, unknown> | null = null;
+      const collectStoppedInstructions = async () => {
+        if (!instructionCopy) return;
+        let saved = await instructionCopies.collectStopped({ companyId: agent.companyId, runId: run.id, target: executionTarget });
+        // Capture before disposal. Exhausted bounded collection leaves a durable
+        // explicit loss report, never a claim that missing bytes were saved.
+        while (saved?.state === "pending_collection" && saved.attempts < 3) {
+          saved = await instructionCopies.collectStopped({ companyId: agent.companyId, runId: run.id, target: executionTarget });
+        }
+        if (!saved) return;
+        const receipt = parseObject(saved.receipt);
+        const storageWarning = readNonEmptyString(receipt.storageWarning);
+        instructionSave = { state: saved.state, entryFile: saved.entryFile,
+          ...(isAgentDirectoryCopy(saved) ? { contract: "agent_files", appliedCandidateHash: saved.candidateHash }
+            : { revisionId: parseObject(receipt.revision).id ?? null }), storageWarning, errorCode: saved.errorCode, errorMessage: saved.errorMessage };
+        await appendRunEvent(run, { eventType: "instruction_save", stream: "system",
+          level: !storageWarning && ["saved", "unchanged", "resolved"].includes(saved.state) ? "info" : "warn",
+          message: storageWarning ?? (saved.state === "saved" ? "Agent files saved."
+            : saved.state === "unchanged" ? "Instruction working copy is unchanged."
+              : saved.errorMessage ?? "Instruction edits were not saved. Review the preserved candidate in the agent instruction editor."),
+          payload: instructionSave });
+      };
       if (managedAiRuntime && aiBinding) {
         try { await assertManagedAiProjectAuth({ ...resolvedConfig, cwd: executionWorkspace.cwd }, aiBinding.provider, executionTarget); }
         catch { throw new ConfigurationIncompleteFailure("Project authentication conflicts with this agent’s managed AI connection", { configurationIncomplete: { reason: "ai_connection_incompatible", actionUrl: `/agents/${agent.id}/runtime` } }); }
@@ -23069,6 +23234,62 @@ export function heartbeatService(
           target: executionTarget,
           workspaceId: persistedExecutionWorkspace?.id ?? null,
         });
+        const hasInstructionFilesystem = nativeRuntimeResolution.kind !== "native"
+          ? adapter.supportsInstructionsBundle === true
+          : !["claude_managed_agents_api", "aws_agentcore_harness_api"].includes(nativeRuntimeResolution.profile.backend);
+        if (hasInstructionFilesystem) {
+          try {
+            // Missing contract fields on a restored session mean the deployed
+            // legacy format. New sessions opt into whole-directory persistence.
+            const priorFileRun = taskSessionForRun?.lastRunId
+              ? await db.select({ profile: heartbeatRuns.runnerProfileJson }).from(heartbeatRuns).where(and(
+                  eq(heartbeatRuns.id, taskSessionForRun.lastRunId), eq(heartbeatRuns.companyId, agent.companyId), eq(heartbeatRuns.agentId, agent.id))).then(rows => rows[0])
+              : null;
+            const savedFileInput = parseObject(parseObject(run.runnerProfileJson).nativeExecutionInput);
+            const priorFileInput = Object.keys(savedFileInput).length ? savedFileInput : parseObject(parseObject(priorFileRun?.profile).nativeExecutionInput);
+            const priorWorkingCopy = parseObject(parseObject(parseObject(priorFileInput.runtimeContext).instructions).workingCopy);
+            instructionCopy = await instructionCopies.prepare({
+              companyId: agent.companyId, agentId: agent.id, runId: run.id,
+              target: executionTarget, cwd: executionWorkspace.cwd,
+              legacy: Object.keys(priorFileInput).length > 0 && priorWorkingCopy.kind !== "agent_files",
+            });
+          } catch (error) {
+            if ((error as { status?: number }).status !== 403) throw error;
+            // Missing write identity must not break a background run's read-only
+            // prompt. It must also never imply that ordinary file edits will save.
+            await appendRunEvent(run, { eventType: "instruction_save", stream: "system", level: "warn",
+              message: "Persistent instruction editing is unavailable. Use an authenticated user with instruction edit access and a managed instruction bundle.",
+              payload: { state: "unavailable", code: "INSTRUCTION_COPY_UNAVAILABLE" } });
+            const guidance = "No editable agent instruction working copy is registered for this turn. Use authenticated agent file tools for persistent edits; do not edit a private copy named in an earlier turn or claim its changes will persist.";
+            for (const key of ["paperclipTaskMarkdown", "paperclipTaskMarkdownCompact"]) {
+              context[key] = [readNonEmptyString(context[key]), guidance].filter(Boolean).join("\n\n");
+            }
+          }
+          if (instructionCopy) {
+            const storageWarning = readNonEmptyString(instructionCopy.receipt?.storageWarning);
+            if (storageWarning) {
+              instructionSave = { state: "prepared", contract: "agent_files", storageWarning };
+              // This is an advisory on the run, never an agent pause, execution
+              // failure, or scheduling gate. Keep it visible while work runs.
+              await db.update(heartbeatRuns).set({ resultJson: sql`coalesce(${heartbeatRuns.resultJson}, '{}'::jsonb) || ${JSON.stringify({ instructionSave })}::jsonb` }).where(eq(heartbeatRuns.id, run.id));
+              await appendRunEvent(run, { eventType: "instruction_save", stream: "system", level: "warn",
+                message: storageWarning, payload: instructionSave });
+            }
+            runtimeConfig = { ...runtimeConfig, instructionsFilePath: path.join(instructionCopy.localRoot, instructionCopy.entryFile) };
+            if (isAgentDirectoryCopy(instructionCopy)) {
+              const workspace = parseObject(context.paperclipWorkspace);
+              context.paperclipWorkspace = { ...workspace, agentHome: instructionCopy.executionRoot,
+                // Keep the pre-existing permission root stable for ACP session
+                // identity. The per-run copy is already under the company root.
+                agentHomeForPermissions: workspace.agentHome,
+              };
+            }
+            const guidance = instructionWorkingCopyGuidance(instructionCopy);
+            for (const key of ["paperclipTaskMarkdown", "paperclipTaskMarkdownCompact"]) {
+              context[key] = [readNonEmptyString(context[key]), guidance].filter(Boolean).join("\n\n");
+            }
+          }
+        }
         let nativeExecution: NativeExecutionInput | null = null;
         let nativeRunnerInstanceId: string | null = null;
         if (nativeRuntimeResolution.kind === "native") {
@@ -23111,6 +23332,50 @@ export function heartbeatService(
                 (response) => response.id === executionContinuation.trigger.interactionId,
               )?.id
             : undefined;
+          const immediateCompletion = (() => {
+            if (nativeReviewRequest) return { requests: [nativeReviewRequest], sources: [null] };
+            const { requests, sources } = nativeCompletionRequestsWithSources(
+              safeWakeComments.length > 0
+                ? safeWakeComments
+                : safeWakeCommentContext?.body
+                  ? [safeWakeCommentContext]
+                  : [],
+              {
+                requiredFullWakeCommentCount:
+                  paperclipWakePayload?.fallbackFetchNeeded === true &&
+                  CHAT_PROVIDERS.some(
+                    (provider) =>
+                      provider ===
+                      paperclipWakePayload.externalChatProvider,
+                  ) &&
+                  Array.isArray(paperclipWakePayload.commentIds)
+                    ? paperclipWakePayload.commentIds.length
+                    : undefined,
+              },
+            );
+            // Preserve every admitted pending chat request while also
+            // retaining newer user direction materialized by recovery.
+            // A file-only wake must not inherit an old task objective.
+            const latestComment =
+              executionContinuation?.messages.findLast(
+                (message) =>
+                  message.authorType === "user" &&
+                  !message.createdByRunId &&
+                  !message.deleted &&
+                  message.body.trim().length > 0,
+              );
+            const latestRequest = latestComment?.body;
+            if (
+              latestRequest &&
+              !requests.some(
+                (request) => request === latestRequest.trim(),
+              )
+            ) {
+              requests.push(latestRequest.trim());
+              sources.push(nativeCompletionSource("comment", latestComment!.id, latestRequest));
+            }
+            return { requests: requests.length > 0 ? requests : undefined, sources };
+          })();
           // Rebuilding a default contract is not a change in user direction.
           // In particular, an upgraded checkpoint may have an intentionally
           // authored contract and no continuation envelope yet.
@@ -23129,49 +23394,18 @@ export function heartbeatService(
                     nativeReviewRequest ?? (currentHumanResponseId
                       ? null
                       : executionContinuation?.objective ?? safeWakeCommentContext?.body ?? null),
+                  // The ordinary initial objective is selected by the server-owned
+                  // continuation envelope. Carry its explicit description source
+                  // through the singular-request compatibility path; do not infer
+                  // provenance for review requests, answers, or wake fallbacks.
+                  immediateRequestSource: nativeImmediateObjectiveSource({
+                    issueId: issueRef.id,
+                    objectiveSource: executionContinuation?.objectiveSource,
+                    excluded: Boolean(nativeReviewRequest || currentHumanResponseId),
+                  }),
                   humanResponseId: currentHumanResponseId,
-                  immediateRequests: (() => {
-                    if (nativeReviewRequest) return [nativeReviewRequest];
-                    const requests = nativeCompletionRequestsForComments(
-                      safeWakeComments.length > 0
-                        ? safeWakeComments
-                        : safeWakeCommentContext?.body
-                          ? [{ body: safeWakeCommentContext.body }]
-                          : [],
-                      {
-                        requiredFullWakeCommentCount:
-                          paperclipWakePayload?.fallbackFetchNeeded === true &&
-                          CHAT_PROVIDERS.some(
-                            (provider) =>
-                              provider ===
-                              paperclipWakePayload.externalChatProvider,
-                          ) &&
-                          Array.isArray(paperclipWakePayload.commentIds)
-                            ? paperclipWakePayload.commentIds.length
-                            : undefined,
-                      },
-                    );
-                    // Preserve every admitted pending chat request while also
-                    // retaining newer user direction materialized by recovery.
-                    // A file-only wake must not inherit an old task objective.
-                    const latestRequest =
-                      executionContinuation?.messages.findLast(
-                        (message) =>
-                          message.authorType === "user" &&
-                          !message.createdByRunId &&
-                          !message.deleted &&
-                          message.body.trim().length > 0,
-                      )?.body;
-                    if (
-                      latestRequest &&
-                      !requests.some(
-                        (request) => request === latestRequest.trim(),
-                      )
-                    ) {
-                      requests.push(latestRequest.trim());
-                    }
-                    return requests.length > 0 ? requests : undefined;
-                  })(),
+                  immediateRequests: immediateCompletion.requests,
+                  immediateRequestSources: immediateCompletion.sources,
                 });
           const taskNativeSessionId = !taskSessionCredentialCompatible ? null : readNonEmptyString(
             taskSessionDecodedParams?.sessionId,
@@ -23485,6 +23719,7 @@ export function heartbeatService(
               runId: run.id,
               runtimeConfig,
               runtimeSkillEntries,
+              instructionWorkingCopy: instructionCopy ? { rootPath: instructionCopy.executionRoot, entryPath: instructionCopy.entryFile, ...(isAgentDirectoryCopy(instructionCopy) ? { kind: "agent_files" as const } : {}) } : undefined,
             });
             const nativeExecutionWithCheckpoint =
               buildNativeExecutionWithCheckpoint({
@@ -23510,6 +23745,7 @@ export function heartbeatService(
                     ].filter(Boolean).join("\n\n"),
                     initialCommunicationGuidance: nativeReviewRequest ? null : readNonEmptyString(context.paperclipTaskCommunicationGuidance),
                     wakePayload: context.paperclipWake,
+                    turnContext: context.paperclipTurnContext,
                     resumedSession,
                     previousTurn: (() => {
                       if (!previousNativeRun || nativeReviewRequest) return null;
@@ -23565,7 +23801,14 @@ export function heartbeatService(
                         : null,
                     ...resolvePaperclipRunnerNativeProviderInput({
                       backend: nativeRuntimeResolution.profile.backend,
-                      adapterConfig: agent.adapterConfig,
+                      adapterConfig: nativeRuntimeResolution.profile.backend === "codex_app_server"
+                        || nativeRuntimeResolution.profile.backend === "opencode_server"
+                        ? projectPaperclipRunnerTaskConfig(
+                            nativeRuntimeResolution.profile.backend,
+                            agent.adapterConfig,
+                            issueAssigneeOverrides?.adapterConfig,
+                          )
+                        : agent.adapterConfig,
                       managedProfile,
                       agentCoreProfile,
                     }),
@@ -23576,6 +23819,7 @@ export function heartbeatService(
                       sha256: completionContract.row.canonicalSha256,
                       schemaVersion: completionContract.row.schemaVersion,
                       contract: completionContract.contract,
+                      sources: "sources" in completionContract ? completionContract.sources : undefined,
                     },
                     runtimeContext: nativeRuntimeContext,
                   }),
@@ -24190,6 +24434,10 @@ export function heartbeatService(
                     },
                     onLog,
                     onEvent: onAdapterEvent,
+                    instructionWorkingCopy: instructionCopy ? {
+                      hasChanges: () => instructionCopies.hasChanges({ companyId: agent.companyId, runId: run.id, target: executionTarget }),
+                      collectStopped: collectStoppedInstructions,
+                    } : undefined,
                     preparationSpans: nativeRunnerPreparationSpans,
                     // Bootstrap with executable/home discovery while keeping
                     // configured provider values and the server-selected
@@ -24203,6 +24451,7 @@ export function heartbeatService(
                         process.env,
                         executionWorkspace.cwd,
                       ),
+                      ...(instructionCopy && isAgentDirectoryCopy(instructionCopy) ? { AGENT_HOME: instructionCopy.executionRoot } : {}),
                       ...(nativeMcpServer
                         ? {
                             PAPERCLIP_NATIVE_MCP_NAME: nativeMcpServer.name,
@@ -24383,6 +24632,7 @@ export function heartbeatService(
                         issueId,
                       );
                     },
+                    onProviderStopped: collectStoppedInstructions,
                     onDispatch: markDispatchStarted,
                     signal: executionControl.controller.signal,
                     ...(executionTarget?.kind === "remote" && executionTarget.transport === "sandbox" ? {
@@ -24431,50 +24681,85 @@ export function heartbeatService(
             if (!guardedDispatch.dispatched) return;
             adapterResult = await guardedDispatch.resultPromise;
           }
+          if (instructionSave) adapterResult.resultJson = { ...adapterResult.resultJson, instructionSave };
           adapterResult = applyWorkspaceRestoreFailure(adapterResult);
           // A returned result can include a failed restore. Keep the workspace
           // barrier closed until required files have been restored.
           // If recording the barrier itself fails, propagate as a run failure
           // rather than silently leaving dependents stranded behind a missing
           // finalize row.
-          if (nativeWorkspaceSync) {
-            await nativeWorkspaceSync.restoreWorkspace();
-          }
-          await db
-            .update(heartbeatRuns)
-            .set({ executionControlDeadlineAt: new Date(Date.now() + 60_000) })
-            .where(
-              and(
-                eq(heartbeatRuns.id, run.id),
-                eq(heartbeatRuns.status, "running"),
-              ),
-            );
-          const workspaceFinalizeStatus = hasWorkspaceRestoreFailure(adapterResult.resultJson) ? "failed" : "succeeded";
-          await recordWorkspaceFinalize(workspaceFinalizeStatus);
-          if (adapterResult.nativeFinalization) {
-            adapterResult.nativeFinalization.workspaceFinalizeStatus =
-              workspaceFinalizeStatus;
+          const completeWorkspace = async (ownership?: NativeWorkspaceFinalizationOwnership) => {
             try {
-              const finalized = await finalizeNativeRun({
-                db,
-                runId: run.id,
-                workspaceFinalizeStatus,
-                preserveProviderAttempt: Boolean(nativeWorkspaceSync),
-              });
-              await dispatchPendingNativeStatusWakeups({
-                companyId: run.companyId,
-              });
-              if (finalized.phase === "committed") {
-                await nativeWorkspaceSync?.cleanup();
+              if (nativeWorkspaceSync) {
+                const exported = await db.select({ id: workspaceOperations.id }).from(workspaceOperations).where(and(
+                  eq(workspaceOperations.companyId, run.companyId),
+                  eq(workspaceOperations.heartbeatRunId, run.id),
+                  eq(workspaceOperations.phase, "workspace_finalize"),
+                  eq(workspaceOperations.status, "succeeded"),
+                )).limit(1);
+                if (exported.length) adapterFinalizeOutcome = "succeeded";
+                else await restoreNativeWorkspaceBestEffort({
+                  db, runId: run.id, assertOwnership: ownership?.assertHeld,
+                  restore: () => nativeWorkspaceSync!.restoreWorkspace(ownership?.assertHeld),
+                });
               }
-            } catch (finalizeErr) {
-              logger.warn(
-                { err: finalizeErr, runId: run.id },
-                "native result persisted but finalization did not apply; the reconciliation loop will retry",
-              );
+              await ownership?.assertHeld();
+              await db
+                .update(heartbeatRuns)
+                .set({ executionControlDeadlineAt: new Date(Date.now() + 60_000) })
+                .where(
+                  and(
+                    eq(heartbeatRuns.id, run.id),
+                    eq(heartbeatRuns.status, "running"),
+                  ),
+                );
+              const workspaceFinalizeStatus = hasWorkspaceRestoreFailure(adapterResult.resultJson) ? "failed" : "succeeded";
+              await recordWorkspaceFinalize(workspaceFinalizeStatus);
+              if (adapterResult.nativeFinalization) {
+                adapterResult.nativeFinalization.workspaceFinalizeStatus =
+                  workspaceFinalizeStatus;
+                try {
+                  const finalized = await finalizeNativeRun({
+                    db,
+                    runId: run.id,
+                    workspaceFinalizeStatus,
+                    preserveProviderAttempt: Boolean(nativeWorkspaceSync),
+                  });
+                  await dispatchPendingNativeStatusWakeups({
+                    companyId: run.companyId,
+                  });
+                  if (finalized.phase === "committed") {
+                    await nativeWorkspaceSync?.cleanup();
+                  }
+                } catch (finalizeErr) {
+                  logger.warn(
+                    { err: finalizeErr, runId: run.id },
+                    "native result persisted but finalization did not apply; the reconciliation loop will retry",
+                  );
+                }
+              }
+            } catch (error) {
+              if (ownership) {
+                await ownership.assertHeld();
+                await recordWorkspaceFinalize("failed");
+              }
+              throw error;
             }
+          };
+          if (nativeWorkspaceSync) {
+            const owned = await withNativeWorkspaceFinalizationOwnership({
+              db, companyId: run.companyId, runId: run.id,
+            }, completeWorkspace);
+            if (!owned.acquired) throw new NativeWorkspaceFinalizationBusyError();
+          } else {
+            await completeWorkspace();
           }
         } catch (adapterErr) {
+          if (adapterErr instanceof NativeWorkspaceFinalizationBusyError
+            || adapterErr instanceof NativeWorkspaceFinalizationOwnershipLostError) {
+            nativeWorkspaceFinalizeScheduled = true;
+            throw adapterErr;
+          }
           if (adapterErr instanceof NativeControllerDetachedForRestartError) {
             // Preserve the provider and its run for the new controller. This
             // also keeps generic teardown from terminalizing/releasing its lease.
@@ -24632,6 +24917,7 @@ export function heartbeatService(
               "failed to revoke heartbeat-run MCP gateway tokens",
             );
           }
+          await instructionCopies.release(agent.companyId, run.id);
         }
         // Reconcile the referenced-project set against the real remote staging outcome. A referenced
         // project can pass authorization and clone locally at run prep, then fail to stage into the
@@ -24794,8 +25080,8 @@ export function heartbeatService(
                 : null;
 
         let logSummary: {
-          bytes: number;
-          sha256?: string;
+          bytes: number | null;
+          sha256?: string | null;
           compressed: boolean;
         } | null = null;
         if (handle) {
@@ -25414,6 +25700,14 @@ export function heartbeatService(
           }
           return;
         }
+        if (err instanceof NativeWorkspaceFinalizationBusyError
+          || err instanceof NativeWorkspaceFinalizationOwnershipLostError) {
+          // Another exact owner is finishing copyback, or this owner lost its
+          // lock connection. Preserve the accepted result and let reconciliation
+          // inspect durable ownership; neither case consumes an export retry.
+          logger.info({ runId: run.id, reason: err.message }, "native workspace finalization deferred to its durable owner");
+          return;
+        }
         if (err instanceof NativeWorkspaceFinalizeScheduledError) {
           const coordinator = await db
             .select({
@@ -25429,7 +25723,9 @@ export function heartbeatService(
             stream: "system",
             level: err.terminalFailure ? "error" : "warn",
             message: err.terminalFailure
-              ? "native result is durable, but the sandbox containing unexported workspace changes is unrecoverable"
+              ? err.reasonCode === "workspace_sync_out_failed"
+                  ? "native result is durable; automatic workspace copy-back retries stopped and saved work is retained for export repair"
+                  : "native result is durable, but the sandbox containing unexported workspace changes is unrecoverable"
               : "native result is durable; workspace copy-back will retry without another provider turn",
             payload: {
               attempt: coordinator?.attempt ?? null,
@@ -25441,13 +25737,13 @@ export function heartbeatService(
           if (err.terminalFailure) {
             // The durable coordinator already failed the run, blocked the
             // issue, and cleared its execution lock. Let ordinary teardown
-            // release the now-useless lease and return the agent to service.
+            // release the lease while retaining the sandbox and its unexported work.
             nativeWorkspaceFinalizeScheduled = false;
             providerResourceDispositionForRun = "stop_and_retain";
             await finalizeAgentStatus(
               run.agentId,
               "failed",
-              "native_workspace_sync_out_unrecoverable",
+              `native_${err.reasonCode}`,
               { wasFirstHeartbeat: timerClaimWasFirstHeartbeat(run) },
             ).catch(() => undefined);
           }
@@ -25503,8 +25799,8 @@ export function heartbeatService(
         logger.error({ err, runId }, "heartbeat execution failed");
 
         let logSummary: {
-          bytes: number;
-          sha256?: string;
+          bytes: number | null;
+          sha256?: string | null;
           compressed: boolean;
         } | null = null;
         if (handle) {
@@ -26013,6 +26309,15 @@ export function heartbeatService(
               },
             );
           }
+          // A retained or unverified process stays above this release boundary.
+          // If no stopped-copy capture occurred, preserve an explicit loss report.
+          const uncapturedInstructions = await instructionCopies.reportUnavailable(run.companyId, run.id);
+          if (uncapturedInstructions?.state === "unavailable") {
+            await appendRunEvent(run, { eventType: "instruction_save", stream: "system", level: "warn",
+              message: "Instruction edits could not be recovered before environment release. No instruction save is claimed.",
+              payload: { state: "unavailable", code: uncapturedInstructions.errorCode } });
+          }
+          await instructionCopies.release(run.companyId, run.id);
           await releaseEnvironmentLeasesForRun({
             runId: run.id,
             companyId: run.companyId,
