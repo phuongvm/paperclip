@@ -39,7 +39,7 @@
   ],
   "scripts": {
     "check:migrations": "tsx src/check-migration-numbering.ts && tsx src/check-migration-safety.ts",
-    "build": "pnpm run check:migrations && tsc && rm -rf dist/migrations && mkdir -p dist/migrations/meta && cp src/migrations/*.sql dist/migrations/ && cp src/migrations/meta/_journal.json dist/migrations/meta/",
+    "build": "pnpm run check:migrations && tsc && node -e \"fs.rmSync('dist/migrations', {recursive:true, force:true}); fs.mkdirSync('dist/migrations/meta', {recursive:true}); for (const f of fs.readdirSync('src/migrations')) if (f.endsWith('.sql')) fs.copyFileSync('src/migrations/' + f, 'dist/migrations/' + f); fs.copyFileSync('src/migrations/meta/_journal.json', 'dist/migrations/meta/_journal.json');\"",
     "clean": "rm -rf dist",
     "typecheck": "pnpm run check:migrations && tsc --noEmit",
     "generate": "pnpm run check:migrations && pnpm run clean && tsc -p tsconfig.json && drizzle-kit generate && pnpm run prune:snapshots",
@@ -56,7 +56,7 @@
   "devDependencies": {
     "@types/node": "^24.0.0",
     "drizzle-kit": "^0.31.10",
-    "tsx": "^4.23.12",
+    "tsx": "^4.23.15",
     "typescript": "^7.0.2",
     "vitest": "^4.1.11"
   },
