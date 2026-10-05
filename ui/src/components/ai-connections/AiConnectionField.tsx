@@ -32,7 +32,6 @@ export function aiProviderForAdapter(
       codex_local: "openai",
       opencode_local: "openrouter",
       grok_local: "xai",
-      hermes_local: "openrouter",
     } as Record<string, AiProvider>
   )[adapterType];
 }

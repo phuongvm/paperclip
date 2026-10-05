@@ -710,10 +710,12 @@ function OnboardingWizardInner({
     ? selectedSavedKey.id
     : savedKeys.options[0]?.id;
   const selectedApiKey = savedKeys.options.find((option) => option.id === selectedApiKeyId);
-  const credentialMode = credentialModeChoice ?? (
-    (savedKeys.subscriptions.length > 0 || (adapterType === "claude_local" && savedKeys.storedLogin.data))
-      ? "subscription" : savedKeys.options.length || adapterType === "opencode_local" ? "api" : "subscription"
-  );
+  const credentialMode = adapterType === "hermes_local"
+    ? "api"
+    : (credentialModeChoice ?? (
+        (savedKeys.subscriptions.length > 0 || (adapterType === "claude_local" && savedKeys.storedLogin.data))
+          ? "subscription" : savedKeys.options.length || adapterType === "opencode_local" ? "api" : "subscription"
+      ));
   const [createdCompanyPrefix, setCreatedCompanyPrefix] = useState<
     string | null
   >((saved?.createdCompanyPrefix as string) ?? null);
@@ -1386,7 +1388,7 @@ function OnboardingWizardInner({
                 label: "Connect",
                 icon: "arrow",
                 disabled:
-                  !connectStepReady || (credentialMode === "api" && !apiKey.trim() && !selectedApiKey),
+                  !connectStepReady || (credentialMode === "api" && adapterType !== "hermes_local" && !apiKey.trim() && !selectedApiKey),
               }
           : // Nothing is chosen on arrival, and the row is what chooses. Until
             // it has been answered the button has nothing to do.
@@ -2694,6 +2696,9 @@ function OnboardingWizardInner({
                         autoConnectStartedRef.current = false;
                         setSourcePicked(true);
                         setAdapterType(id);
+                        if (id === "hermes_local") {
+                          setCredentialMode("api");
+                        }
                         if (id === "opencode_local") setModel(DEFAULT_OPENCODE_LOCAL_MODEL);
                         else if (id !== "codex_local") setModel("");
                         setConnectPhase("collapsing");
@@ -2723,7 +2728,7 @@ function OnboardingWizardInner({
                       transition={{ opacity: SOURCE_LINK_EXIT, height: MAKE_ROOM }}
                     >
                       <div className="-ml-3 mt-1">
-                        <CredentialModeLink mode={credentialMode} onChange={setCredentialMode} />
+                        {adapterType !== "hermes_local" && <CredentialModeLink mode={credentialMode} onChange={setCredentialMode} />}
                         {savedKeys.options.length > 0 && <p className="px-3 text-sm text-muted-foreground">{savedKeys.options.length} saved API {savedKeys.options.length === 1 ? "key available" : "keys available"}.</p>}
                         {credentialMode === "subscription" && authSignalStatus === "present" && <p className="px-3 text-sm text-muted-foreground">An existing provider connection is available.</p>}
                       </div>
@@ -2773,9 +2778,17 @@ function OnboardingWizardInner({
                       </p>
                     ) : credentialMode === "api" ? (
                       <OnboardingLoginCard
-                        instruction={savedKeys.options.length ? "Choose a saved API key or enter a new one" : `Provide your ${
-                          CONNECT_SOURCE_NAMES[adapterType] ?? adapterType
-                        } API key to connect`}
+                        instruction={
+                          adapterType === "hermes_local"
+                            ? (savedKeys.options.length
+                                ? "Choose a saved API key or use your local Hermes configuration"
+                                : "Provide an API key or connect using your local Hermes configuration")
+                            : (savedKeys.options.length
+                                ? "Choose a saved API key or enter a new one"
+                                : `Provide your ${
+                                    CONNECT_SOURCE_NAMES[adapterType] ?? adapterType
+                                  } API key to connect`)
+                        }
                       >
                         <SavedProviderKeySelect {...savedKeys} disabled={loading || adapterEnvLoading} value={selectedApiKey?.id ?? ""} onChange={(id) => {
                           setSelectedSavedKey(createdCompanyId ? { companyId: createdCompanyId, envKey: apiKeyEnvKeyFor(adapterType), id } : null);
@@ -2783,7 +2796,7 @@ function OnboardingWizardInner({
                         }} />
                         {!selectedApiKey && <OnboardingCardField
                           label="API key"
-                          placeholder="Enter API key here"
+                          placeholder={adapterType === "hermes_local" ? "Optional if Hermes is configured locally" : "Enter API key here"}
                           masked
                           // The card is the answer to the tile just pressed, so
                           // the field is unambiguously the next thing. Carried
