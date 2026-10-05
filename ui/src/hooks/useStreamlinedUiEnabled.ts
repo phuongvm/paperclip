@@ -31,6 +31,7 @@ export function useStreamlinedUiEnabled(): { enabled: boolean; loaded: boolean }
       queryKey: queryKeys.instance.experimentalSettings,
       queryFn: () => instanceSettingsApi.getExperimental(),
       enabled: contextClient != null,
+      retry: false,
     },
     contextClient ?? getDetachedClient(),
   );

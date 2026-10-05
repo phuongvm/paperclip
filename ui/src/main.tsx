@@ -21,6 +21,7 @@ import { PluginLauncherProvider } from "./plugins/launchers";
 import { startPerfMeasureReaper } from "./lib/perf-measure-reaper";
 import { getOrCreatePaperclipReactRoot } from "./lib/react-root";
 import { startServiceWorkerUpdates } from "./lib/service-worker-updates";
+import { isTemporaryApiError } from "./api/response";
 import "@mdxeditor/editor/style.css";
 import "./index.css";
 
@@ -48,6 +49,10 @@ const queryClient = new QueryClient({
       // tuning point if we need to trim the cache footprint further.
       gcTime: 5 * 60_000,
       refetchOnWindowFocus: true,
+      retry: (failureCount, error) => {
+        if (!isTemporaryApiError(error)) return false;
+        return failureCount < 3;
+      },
     },
   },
 });
