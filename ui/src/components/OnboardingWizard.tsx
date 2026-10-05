@@ -214,6 +214,7 @@ function adapterConfigHasAnthropicApiKey(config: Record<string, unknown>): boole
  */
 const MODEL_SOURCE_BRAND_MARKS: Record<string, string> = {
   claude_local: "/brands/claude-color.svg",
+  hermes_local: "/brands/adapters/hermesagent.svg",
 };
 
 
@@ -251,6 +252,7 @@ const MODEL_SOURCE_INLINE_MARKS: Record<string, ComponentType<{ className?: stri
 const API_KEY_ENV_KEYS: Record<string, string> = {
   claude_local: ANTHROPIC_API_KEY_ENV_KEY,
   codex_local: "OPENAI_API_KEY",
+  hermes_local: "OPENROUTER_API_KEY",
 };
 
 function apiKeyEnvKeyFor(adapterType: string): string {
@@ -1520,6 +1522,7 @@ function OnboardingWizardInner({
     pi_local: "pi",
     cursor: "agent",
     opencode_local: "opencode",
+    hermes_local: "hermes",
   };
   const effectiveAdapterCommand =
     command.trim() ||
