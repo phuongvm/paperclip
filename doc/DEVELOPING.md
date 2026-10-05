@@ -140,6 +140,12 @@ choices, item verdicts, suggested tasks, tool reviews, runtime questions, and ph
 the bottom navigation. The normal message composer remains usable below the
 pending card.
 
+Use **Chat & Comments → Task Chat Unanswered Questions → Test Drive** to
+try a regular task question: dismiss it, reload, reopen its compact feed entry,
+and submit the preserved draft. The composer has no question pending badge.
+The demo uses real thread/form components with fixture response callbacks.
+The Agent Chat stories share the same component fixture.
+
 Use **Composer → Model and effort picker** to review harness-specific model
 choices. Codex uses the curated adapter catalog unless the instance declares
 `PAPERCLIP_ADAPTER_MODELS`; general OpenAI API models are not Codex choices.
@@ -1215,6 +1221,29 @@ and verifies them without uploading a binary or installing packages. Deploy
 the updated sandbox image with the matching runner qualification changes.
 
 ### Native runner restart recovery
+
+Project discovery through `list_projects` returns up to 50 compact summaries.
+It uses `GET /api/companies/:companyId/projects?view=summary&limit=50&cursor=...`;
+the cursor is optional. The database reads bounded summary projections. Agent
+and run trust boundaries narrow database candidates before per-project access
+checks. Projects with their own authorization policy remain candidates because
+that policy can contribute scope; every result still passes the full access check.
+Only visible projects determine page boundaries and continuations.
+The default project-list API response remains unchanged.
+Use its `nextCursor` as the next call's `cursor` until it is null; `limit` accepts
+1–50. Descriptions include at most 1,000 characters and an explicit truncation
+flag. Full project records remain available through the authorized project API.
+Workspace configuration is excluded from discovery responses so large projects
+cannot overflow the runner's durable tool-result command limit.
+
+When an accepted result survives a shutdown failure, workspace repair uses a
+new assessment for the repaired workspace state. Its status decision and
+assessment reference commit together. Recovery completes from the saved result
+without another provider turn, clears stale successful-run errors, and retains
+the original error in `recoveredExecutionFailure`. Exact-state session cleanup
+recognizes both the legacy `adapter_failed` and current `provider_transport_failed`
+close-failure labels. Process ownership, pending tool outcomes, and checkpoint
+verification still control whether that session can be reused.
 
 Paperclip Runner keeps its heartbeat run, native session, logical runner, and
 provider session identities across server restarts. A coordinated hot restart
