@@ -108,9 +108,29 @@ export async function claimBoardOwnership(
       .delete(instanceUserRoles)
       .where(and(eq(instanceUserRoles.userId, LOCAL_BOARD_USER_ID), eq(instanceUserRoles.role, "instance_admin")));
 
-    const allCompanies = await tx.select({ id: companies.id }).from(companies);
+    const allCompanies = await tx
+      .select({ id: companies.id, defaultResponsibleUserId: companies.defaultResponsibleUserId })
+      .from(companies);
     for (const company of allCompanies) {
       claimedCompanyIds.push(company.id);
+
+      if (company.defaultResponsibleUserId === LOCAL_BOARD_USER_ID) {
+        await tx
+          .update(companies)
+          .set({ defaultResponsibleUserId: opts.userId, updatedAt: new Date() })
+          .where(eq(companies.id, company.id));
+      }
+
+      await tx
+        .delete(companyMemberships)
+        .where(
+          and(
+            eq(companyMemberships.companyId, company.id),
+            eq(companyMemberships.principalType, "user"),
+            eq(companyMemberships.principalId, LOCAL_BOARD_USER_ID),
+          ),
+        );
+
       const existing = await tx
         .select({ id: companyMemberships.id, status: companyMemberships.status })
         .from(companyMemberships)

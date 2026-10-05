@@ -120,6 +120,18 @@ describeEmbeddedPostgres("board claim", () => {
         membershipRole: "owner",
       },
     ]);
+    await expect(
+      db
+        .select()
+        .from(companyMemberships)
+        .where(
+          and(
+            eq(companyMemberships.companyId, company.id),
+            eq(companyMemberships.principalType, "user"),
+            eq(companyMemberships.principalId, "local-board"),
+          ),
+        ),
+    ).resolves.toHaveLength(0);
     expect(inspectBoardClaimChallenge(token, code)).toMatchObject({
       status: "claimed",
       claimedByUserId: userId,
