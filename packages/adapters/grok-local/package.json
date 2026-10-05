@@ -45,7 +45,7 @@
     "dist"
   ],
   "scripts": {
-    "build": "tsc && cp src/server/grok-auth-merge-decision.cjs dist/server/",
+    "build": "tsc && node -e \"fs.mkdirSync('dist/server', {recursive:true}); fs.copyFileSync('src/server/grok-auth-merge-decision.cjs', 'dist/server/grok-auth-merge-decision.cjs')\"",
     "clean": "rm -rf dist",
     "typecheck": "tsc --noEmit"
   },
