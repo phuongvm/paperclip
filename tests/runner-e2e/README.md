@@ -1,5 +1,15 @@
 # Paid runner full-stack E2E
 
+## Live provider connection journeys
+
+See [PROVIDER-CONNECTIONS.md](PROVIDER-CONNECTIONS.md) for the explicit-only
+`provider-connections` suite, local/staging target ownership, dedicated browser
+profiles, credential handoffs, private evidence, and cleanup contract.
+
+The [public MCP suite](PUBLIC-MCP.md) adds explicit paid assistant/plugin journeys
+with authenticated browser consent, real MCP tool use and independently graded
+team execution. Select `--suite public-mcp`; it is excluded from `--all`.
+
 For family selection, ownership, provenance, history, and failure taxonomy,
 see the [Paperclip evaluation guide](../../doc/evals.md). This README is the
 authoritative runbook for Product E2E runner cells; the separate Runner Evals
@@ -11,6 +21,31 @@ profiles. It is deliberately separate from `tests/e2e`: every independently
 scheduled execution gets
 a fresh Paperclip home, embedded Postgres database, instance configuration,
 port, workspace, company, encrypted secrets, environment, and agent.
+
+## Native procedure guidance comparison (explicit only)
+
+Select `--suite everyday-workflows --environment local --case hire-reuse --case delegate-feedback
+--profile runner-codex --profile runner-acpx-claude --profile runner-opencode` for the six comparison
+cells on native Codex, ACPX Claude, and OpenCode.
+Both variants use the same Studio Lead persona, original user requests,
+artifact oracle, lifecycle checks, models and permissions. Each cell permits
+one attempt, a 12-minute deadline, at most 12 story run records, and a
+1,000-cent company hard stop; the lead also has a 1,000-cent hard stop. Worker
+runs count toward the company budget. The suite is excluded from `--all`.
+
+Compare frozen branches on the same master with identical fixture sources.
+Retain each original grade, source SHA, harness digest, actual run inventory,
+downloaded artifacts and partial cost evidence. Check hiring identity/reuse,
+worker ownership, delivered revisions, dependency release and parent completion
+ordering independently of aggregate grades. These bounded stories do not
+qualify every existing-blocker combination or arbitrary provider resume.
+
+The provider-free `native-procedure-measurement.test.ts` uses the server's real
+tool authority and captures scripted start/resume/continuation delivery plus
+the OpenCode MCP catalog. It includes descriptions and argument schemas. Its
+byte counts are not model token counts or proof of an upstream harness's lazy
+loading/truncation. The older completion measurement used a partial catalog;
+do not use it as a full production tool-payload baseline.
 
 The vocabulary is: a **campaign** is one workflow invocation against one SHA; a
 **suite** is a durable testing purpose; a **matrix** is that suite's profiles ×
@@ -771,6 +806,12 @@ The temporary Paperclip home, embedded database, raw workspace, master key,
 and unredacted logs are removed after each attempt. Daytona teardown destroys
 the environment and any reusable leases through the public API; provider-side
 auto-stop/archive/delete values remain as cancellation backstops.
+
+## Planning guidance utility
+
+The explicit-only [planning comparison](PLAN-TASK-GUIDANCE.md) tests current, short,
+and disabled planning skills across four saved business outcomes on native Codex.
+It adds twelve single-attempt cells and does not expand `--all`.
 
 ## GitHub Actions
 

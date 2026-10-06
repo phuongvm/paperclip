@@ -4,6 +4,8 @@ import { AggregatorDiscoveryUnavailableError, discoverArcadeApps, discoverExecut
 import { COMPOSIO_APP_TOOLKITS, findComposioCatalogApp } from "@paperclipai/shared/aggregator-app-catalog";
 import type { ComposioAppAccount, ComposioAppAccountInput, ComposioAppSetupInput, ComposioAppSetupResult, ComposioAppSnapshot, ComposioAppsResponse } from "@paperclipai/shared";
 import { composioAppAccounts, composioAppSetupResult } from "./composio-app-setup.js";
+import { honchoManagedArguments } from "./honcho-connection.js";
+import { defaultConnectionAgentInstructions } from "@paperclipai/shared";
 import { isInsufficientConnectionScope, INSUFFICIENT_CONNECTION_SCOPE_MESSAGE } from "./connection-permission-errors.js";
 import { ASANA_CONNECTOR_SCOPES, isAsanaConnectorProfileId, type AsanaConnectorProfileId } from "@paperclipai/shared";
 import { BROWSER_USE_TOOLS } from "@paperclipai/shared";
@@ -286,6 +288,7 @@ type ActorInfo = {
     | "board_key"
     | "agent_key"
     | "agent_jwt"
+    | "mcp_oauth"
     | "cloud_tenant";
 };
 
@@ -1208,10 +1211,14 @@ export function projectedConnectionHeaders(
   const headers: Record<string, string> = {};
   if (app) {
     const method = connectionMethodForConnection(app, connection);
-    Object.assign(headers, normalizeConnectionMethodConfig(
-      method,
-      asRecord(connection.config.methodConfig),
-    ).headers);
+    // Non-transport settings do not participate in header projection. In
+    // particular, legacy connections can lack a newly introduced setting.
+    if ([...(method.tenantFields ?? []), ...(method.extensionFields ?? [])].some((field) => field.transport?.location === "header")) {
+      Object.assign(headers, normalizeConnectionMethodConfig(
+        method,
+        asRecord(connection.config.methodConfig),
+      ).headers);
+    }
   }
   if (
     connection.transport === "mcp_remote" &&
@@ -1304,7 +1311,10 @@ export function projectedConnectionToolArguments(
   connection: typeof toolConnections.$inferSelect,
   parameters: unknown,
   toolName: string,
+  inputSchema: Record<string, unknown> = {},
 ): Record<string, unknown> {
+  const managed = honchoManagedArguments(connection, inputSchema);
+  if (managed) parameters = mergeManagedToolArguments(asRecord(parameters), managed);
   assertGoogleChatToolArgumentsSupported(connection, toolName, parameters);
   const sourceTemplateKey =
     typeof connection.config.sourceTemplateKey === "string"
@@ -1325,6 +1335,8 @@ export function projectedConnectionToolInputSchema(
   inputSchema: Record<string, unknown>,
   toolName: string,
 ): Record<string, unknown> {
+  const managed = honchoManagedArguments(connection, inputSchema);
+  if (managed) inputSchema = stripManagedToolArgumentSchema(inputSchema, managed);
   inputSchema = googleChatToolInputSchema(connection, toolName, inputSchema);
   const sourceTemplateKey =
     typeof connection.config.sourceTemplateKey === "string"
@@ -1623,6 +1635,7 @@ function toConnection(row: typeof toolConnections.$inferSelect): ToolConnection 
     credentialPolicy: row.credentialPolicy,
     status: row.status,
     enabled: row.enabled && !retired,
+    agentInstructions: row.agentInstructions ?? null,
     config: row.config ?? {},
     transportConfig: row.transportConfig ?? {},
     credentialRefs: row.credentialRefs ?? [],
@@ -2245,6 +2258,7 @@ function connectionSetupMutationFingerprint(
     transport: row.transport,
     status: row.status,
     enabled: row.enabled,
+    agentInstructions: row.agentInstructions,
     config: row.config,
     transportConfig: row.transportConfig,
     credentialRefs: row.credentialRefs,
@@ -2385,6 +2399,11 @@ export function classifyRisk(
   if (sourceTemplateKey === "fireflies" && [
     "fireflies-share-meeting", "fireflies-revoke-meeting-access", "fireflies-move-meeting",
   ].includes(normalizedToolName)) return "write";
+  // Enterpret's run_graph_query self-reports readOnlyHint: true, but Cypher is
+  // not a read-only language and live validation never established the tool as
+  // safe. Treat it as write so Ask-first defaults can restrict it.
+  if (sourceTemplateKey === "enterpret" && normalizedToolName === "run-graph-query")
+    return "write";
   if (sourceTemplateKey === "posthog" && normalizedToolName === "exec")
     return "destructive";
   if (
@@ -5888,7 +5907,38 @@ export function toolAccessService(
       previous: typeof connectionGrants.$inferSelect | null;
       current: typeof connectionGrants.$inferSelect;
     }) => void,
+    /**
+     * Scope provenance from the authorization that just completed, for the callers that have
+     * one. The default organization grant is created before OAuth has issued any credentials,
+     * so without this the grants API reads back a shared identity whose scope has no source
+     * and no over-grant warning — while the connection record carries both.
+     *
+     * Deliberately scope fields only. The shared grant takes its credential lifecycle from the
+     * connection, and writing `accessTokenExpiresAt` here would make an expired connection
+     * look fresh to the refresh-due check and skip the reconnect prompt.
+     */
+    oauthProvenance?: {
+      scopes: string[];
+      scopeSource: "provider" | "requested_fallback";
+      unrequestedScopes: string[];
+      requestedScopes: string[];
+    },
   ) {
+    const providerTenantWithOauth = (
+      current: (typeof connectionGrants.$inferSelect)["providerTenant"],
+    ) =>
+      oauthProvenance
+        ? {
+            ...(current ?? {}),
+            oauth: {
+              ...(current?.oauth ?? {}),
+              scopes: oauthProvenance.scopes,
+              scopeSource: oauthProvenance.scopeSource,
+              unrequestedScopes: oauthProvenance.unrequestedScopes,
+              requestedScopes: oauthProvenance.requestedScopes,
+            },
+          }
+        : current;
     const [existing] = await dbClient
       .select()
       .from(connectionGrants)
@@ -5915,6 +5965,9 @@ export function toolAccessService(
           credentialSecretRefs: isRailwayConnection(connection)
             ? [...connection.credentialSecretRefs, ...existing.credentialSecretRefs.filter((ref) => ref.configPath === RAILWAY_SSH_SECRET_PATH && !connection.credentialSecretRefs.some((candidate) => candidate.configPath === ref.configPath))]
             : connection.credentialSecretRefs,
+          ...(oauthProvenance
+            ? { providerTenant: providerTenantWithOauth(existing.providerTenant) }
+            : {}),
           status: "active",
           revokedAt: null,
           revokedByAgentId: null,
@@ -5935,6 +5988,9 @@ export function toolAccessService(
         connectionId: connection.id,
         kind: "organization",
         credentialSecretRefs: connection.credentialSecretRefs,
+        ...(oauthProvenance
+          ? { providerTenant: providerTenantWithOauth(null) }
+          : {}),
         status: "active",
         isDefault: true,
       })
@@ -7724,11 +7780,14 @@ export function toolAccessService(
       isGoogleWorkspaceConnectorProfileId(googleProfileValue)
         ? googleProfileValue
         : null;
+    const preserveReviewedCatalog =
+      (isRailwayEndpoint(connection.config.url) || sourceTemplateKey === "enterpret") &&
+      existingRows.length > 0;
     const quarantineOnRefresh =
-      (!refreshOptions.enableAllByDefault || (isRailwayEndpoint(connection.config.url) && existingRows.length > 0)) &&
+      (!refreshOptions.enableAllByDefault || preserveReviewedCatalog) &&
       shouldQuarantineNewEntries(connection) &&
       (connection.status === "active" ||
-        (isRailwayEndpoint(connection.config.url) && existingRows.length > 0) ||
+        preserveReviewedCatalog ||
         sourceTemplateKey === "posthog" ||
         refreshOptions.quarantineManagedOAuthDraft === true);
     const safeDefault = asRecord(connection.config).safeDefault === true;
@@ -7824,12 +7883,14 @@ export function toolAccessService(
       }
     }
 
-    const normalizedConfig = isRailwayEndpoint(connection.config.url)
+    const preserveQuarantine =
+      isRailwayEndpoint(connection.config.url) || sourceTemplateKey === "enterpret";
+    const normalizedConfig = preserveQuarantine
       ? { ...connection.config, quarantineNewEntries: true }
       : refreshOptions.enableAllByDefault
       ? { ...connection.config, quarantineNewEntries: false }
       : connection.config;
-    const normalizedTransportConfig = isRailwayEndpoint(connection.config.url)
+    const normalizedTransportConfig = preserveQuarantine
       ? { ...connection.transportConfig, quarantineNewEntries: true }
       : refreshOptions.enableAllByDefault
       ? { ...connection.transportConfig, quarantineNewEntries: false }
@@ -8951,6 +9012,74 @@ export function toolAccessService(
         .map((item) => item.trim())
         .filter(Boolean);
     return [];
+  }
+
+  /**
+   * Decide what a token grant actually carries, keeping the provider's assertion separate from
+   * our own request.
+   *
+   * RFC 6749 §5.1 permits a provider to omit `scope` only when the grant is identical to the
+   * request, so reading the request as the grant is the specified fallback. A provider that
+   * over-grants *and* omits `scope` breaks that contract, and recording the request unmarked
+   * turns what we asked for into a confident-looking record of what we got. `scopeSource` keeps
+   * the two readable apart so nothing downstream can mistake an inference for an assertion.
+   *
+   * `unrequestedScopes` is only meaningful when we asked for something specific; with no
+   * requested scopes there is no baseline to compare against, so it stays empty rather than
+   * flagging every scope on connections that keep their scopes in provider-side app config.
+   *
+   * `previous` is the provenance already recorded for this grant. A refresh response that omits
+   * `scope` asserts nothing at all — least of all that a permission was taken away — so the
+   * earlier record is carried forward verbatim instead of being overwritten with a clean-looking
+   * inference. Only a fresh provider assertion replaces a recorded over-grant.
+   */
+  function resolveGrantedOauthScopes(input: {
+    tokenScope: unknown;
+    requestedScopes: unknown;
+    previous?: {
+      scopes?: unknown;
+      scopeSource?: unknown;
+      unrequestedScopes?: unknown;
+    };
+  }): {
+    scopes: string[];
+    scopeSource: "provider" | "requested_fallback";
+    unrequestedScopes: string[];
+  } {
+    const requested = normalizeOauthScopes(input.requestedScopes);
+    const asserted =
+      input.tokenScope === undefined || input.tokenScope === null
+        ? []
+        : normalizeOauthScopes(input.tokenScope);
+    if (asserted.length === 0) {
+      const previousScopes = normalizeOauthScopes(input.previous?.scopes);
+      const previousUnrequested = normalizeOauthScopes(
+        input.previous?.unrequestedScopes,
+      );
+      if (previousScopes.length > 0) {
+        return {
+          scopes: previousScopes,
+          scopeSource:
+            input.previous?.scopeSource === "provider"
+              ? "provider"
+              : "requested_fallback",
+          unrequestedScopes: previousUnrequested,
+        };
+      }
+      return {
+        scopes: requested,
+        scopeSource: "requested_fallback",
+        unrequestedScopes: previousUnrequested,
+      };
+    }
+    return {
+      scopes: asserted,
+      scopeSource: "provider",
+      unrequestedScopes:
+        requested.length === 0
+          ? []
+          : asserted.filter((scope) => !requested.includes(scope)),
+    };
   }
 
   function isSmokeLabOAuthUrl(value: string | null | undefined) {
@@ -10749,6 +10878,7 @@ export function toolAccessService(
         | "board_key"
         | "agent_key"
         | "agent_jwt"
+        | "mcp_oauth"
         | "cloud_tenant";
       issueId?: string | null;
       heartbeatRunId?: string | null;
@@ -11632,6 +11762,27 @@ export function toolAccessService(
         const expiresAt = token.expiresIn
           ? new Date(Date.now() + token.expiresIn * 1000).toISOString()
           : null;
+        // A refresh carries no fresh authorization request, so the baseline stays what
+        // Paperclip asked for when *this* grant was authorized. Judging the response against
+        // the grant's own scopes instead would let an over-grant that the provider re-asserts
+        // on every refresh read back as clean, because the widened grant would have become
+        // its own baseline. The connection-level list is only a fallback for grants created
+        // before the per-grant baseline existed — it is whichever callback ran last, so on a
+        // connection two users authorized with different scopes it is the wrong baseline for
+        // at least one of them.
+        const refreshed = resolveGrantedOauthScopes({
+          tokenScope: token.scope,
+          requestedScopes:
+            grantOauth.requestedScopes ??
+            oauth.scopes ??
+            oauth.scope ??
+            grantOauth.scopes,
+          previous: {
+            scopes: grantOauth.scopes,
+            scopeSource: grantOauth.scopeSource,
+            unrequestedScopes: grantOauth.unrequestedScopes,
+          },
+        });
         const providerTenant = {
           ...(grant.providerTenant ?? {}),
           oauth: {
@@ -11641,9 +11792,9 @@ export function toolAccessService(
                 ? grantOauth.strategy
                 : "direct_oauth",
             accessTokenExpiresAt: expiresAt ?? undefined,
-            scopes: normalizeOauthScopes(
-              token.scope ?? grantOauth.scopes ?? oauth.scopes ?? oauth.scope,
-            ),
+            scopes: refreshed.scopes,
+            scopeSource: refreshed.scopeSource,
+            unrequestedScopes: refreshed.unrequestedScopes,
             tokenType: token.tokenType,
             refreshedAt: now().toISOString(),
           },
@@ -11694,6 +11845,11 @@ export function toolAccessService(
               oauth: {
                 expiresAt,
                 scope: token.scope ?? latestOauth.scope ?? null,
+                // Carry the same provenance the grant just recorded. Without it a connection
+                // read reverts to a bare scope with no source and no over-grant warning after
+                // the first ordinary refresh, while the grant read still has both.
+                scopeSource: refreshed.scopeSource,
+                unrequestedScopes: refreshed.unrequestedScopes,
                 tokenType: token.tokenType,
               },
             },
@@ -11762,6 +11918,7 @@ export function toolAccessService(
         | "board_key"
         | "agent_key"
         | "agent_jwt"
+        | "mcp_oauth"
         | "cloud_tenant";
       issueId?: string | null;
       heartbeatRunId?: string | null;
@@ -12564,7 +12721,7 @@ export function toolAccessService(
     const normalizedMethodConfig =
       isGoogleSheetsRobotMethod || !method
         ? null
-        : normalizeConnectionMethodConfig(method, input.configValues);
+        : normalizeConnectionMethodConfig(method, input.configValues ?? asRecord(asRecord(retainedConnection?.config).methodConfig));
     const remoteUrlCredential =
       transport === "mcp_remote" && input.link
         ? splitRemoteUrlCredential(input.link)
@@ -12590,7 +12747,7 @@ export function toolAccessService(
           // Grant-backed setup keeps the full discovered catalog selectable;
           // the wizard projects the app's action defaults into policies at
           // finish time instead of using catalog quarantine as access state.
-          quarantineNewEntries: galleryEntry.slug === "railway",
+          quarantineNewEntries: galleryEntry.slug === "railway" || galleryEntry.slug === "enterpret",
           ...(remoteMcpConnector ? {
             mcpSessionRequired: true,
             mcpAuthMode: input.authMode ?? "auto",
@@ -12962,6 +13119,10 @@ export function toolAccessService(
             transport,
             status: "draft",
             enabled: false,
+            agentInstructions: input.agentInstructions !== undefined
+              ? input.agentInstructions
+              : retainedConnection ? retainedConnection.agentInstructions
+              : defaultConnectionAgentInstructions(galleryEntry?.agentInstructions),
             config,
             transportConfig: config,
             credentialRefs,
@@ -12995,6 +13156,10 @@ export function toolAccessService(
             transport,
             status: "draft",
             enabled: false,
+            agentInstructions: input.agentInstructions !== undefined
+              ? input.agentInstructions
+              : retainedConnection ? retainedConnection.agentInstructions
+              : defaultConnectionAgentInstructions(galleryEntry?.agentInstructions),
             config,
             transportConfig: config,
             credentialRefs,
@@ -13391,6 +13556,7 @@ export function toolAccessService(
               await tx
                 .update(toolConnections)
                 .set({
+                  agentInstructions: revivedConnectionPrevious.agentInstructions,
                   name: revivedConnectionPrevious.name,
                   transport: revivedConnectionPrevious.transport,
                   status: revivedConnectionPrevious.status,
@@ -13700,7 +13866,7 @@ export function toolAccessService(
       const config = { ...connection.config };
       delete config.mcpPreserveAccess;
       const updated = await db.transaction(async (tx) => {
-        const [row] = await tx.update(toolConnections).set({ config, transportConfig: config, status: "active", enabled: true, updatedAt: new Date() })
+        const [row] = await tx.update(toolConnections).set({ config, transportConfig: config, status: "active", enabled: true, ...(input.agentInstructions !== undefined ? { agentInstructions: input.agentInstructions } : {}), updatedAt: new Date() })
           .where(and(eq(toolConnections.id, connection.id), eq(toolConnections.companyId, companyId))).returning();
         await tx.update(toolApplications).set({ status: "active", updatedAt: new Date() }).where(and(eq(toolApplications.id, connection.applicationId), eq(toolApplications.companyId, companyId)));
         return row;
@@ -14053,7 +14219,7 @@ export function toolAccessService(
       );
       const [updatedConnection] = await tx
         .update(toolConnections)
-        .set({ status: "active", enabled: true, updatedAt: new Date() })
+        .set({ status: "active", enabled: true, ...(input.agentInstructions !== undefined ? { agentInstructions: input.agentInstructions } : {}), updatedAt: new Date() })
         .where(eq(toolConnections.id, connection.id))
         .returning();
       await tx
@@ -16056,6 +16222,10 @@ export function toolAccessService(
             nextCredentialSecretRefs.push(existingRefreshRef);
         }
 
+        const grantedScopes = resolveGrantedOauthScopes({
+          tokenScope: token.scope,
+          requestedScopes: authorizedScopes,
+        });
         const grantValues = {
           providerTenant: {
             ...(existingUserGrant?.providerTenant ?? {}),
@@ -16063,9 +16233,13 @@ export function toolAccessService(
               ...asRecord(asRecord(existingUserGrant?.providerTenant).oauth),
               strategy: "direct_oauth",
               accessTokenExpiresAt: expiresAt ?? undefined,
-              scopes: normalizeOauthScopes(
-                token.scope ?? authorizedScopes,
-              ),
+              scopes: grantedScopes.scopes,
+              scopeSource: grantedScopes.scopeSource,
+              unrequestedScopes: grantedScopes.unrequestedScopes,
+              // Per-grant, because two users can authorize the same connection with
+              // different scopes. The connection-level list is whichever callback ran last,
+              // so it is the wrong baseline for anyone else's refresh.
+              requestedScopes: authorizedScopes,
               tokenType: token.tokenType,
               refreshedAt: connectedAt.toISOString(),
             },
@@ -16121,6 +16295,8 @@ export function toolAccessService(
             oauth: {
               expiresAt,
               scope: token.scope,
+              scopeSource: grantedScopes.scopeSource,
+              unrequestedScopes: grantedScopes.unrequestedScopes,
               tokenType: token.tokenType,
             },
           },
@@ -16356,6 +16532,10 @@ export function toolAccessService(
         if (existingRefreshRef)
           nextCredentialSecretRefs.push(existingRefreshRef);
       }
+      const organizationGrantedScopes = resolveGrantedOauthScopes({
+        tokenScope: token.scope,
+        requestedScopes: authorizedScopes,
+      });
       const nextConfig = {
         ...connection.config,
         oauth: {
@@ -16381,7 +16561,13 @@ export function toolAccessService(
         },
         providerMetadata: {
           ...asRecord(connection.config.providerMetadata),
-          oauth: { expiresAt, scope: token.scope, tokenType: token.tokenType },
+          oauth: {
+            expiresAt,
+            scope: token.scope,
+            scopeSource: organizationGrantedScopes.scopeSource,
+            unrequestedScopes: organizationGrantedScopes.unrequestedScopes,
+            tokenType: token.tokenType,
+          },
         },
       };
       const [updatedConnection] = await tx
@@ -16419,7 +16605,12 @@ export function toolAccessService(
       // Synchronize it after every successful callback/rotation so all real tool
       // execution paths receive the credentials that setup and catalog discovery
       // just proved.
-      await ensureDefaultOrganizationGrant(connection, tx);
+      await ensureDefaultOrganizationGrant(connection, tx, undefined, {
+        scopes: organizationGrantedScopes.scopes,
+        scopeSource: organizationGrantedScopes.scopeSource,
+        unrequestedScopes: organizationGrantedScopes.unrequestedScopes,
+        requestedScopes: authorizedScopes,
+      });
       await syncCredentialBindings(connection, [], tx);
     });
     emitConnectionUpdated(
@@ -17851,6 +18042,9 @@ export function toolAccessService(
             (input.authKind === "oauth" ? "per_user" : "shared"),
           status: input.status ?? "draft",
           enabled: input.enabled ?? false,
+          agentInstructions: input.agentInstructions !== undefined ? input.agentInstructions : defaultConnectionAgentInstructions(
+            typeof config.sourceTemplateKey === "string" ? getConnectableAppDefinition(config.sourceTemplateKey)?.agentInstructions : null,
+          ),
           config,
           transportConfig: isGoogleSheetsConnectionConfig(config)
             ? config
@@ -18723,6 +18917,10 @@ export function toolAccessService(
       const config = normalizeGoogleSheetsConnectionConfig(
         input.config ?? input.transportConfig ?? existing.config,
       );
+      if (input.config?.methodConfig !== undefined && typeof config.sourceTemplateKey === "string") {
+        const app = getConnectableAppDefinition(config.sourceTemplateKey);
+        if (app) normalizeConnectionMethodConfig(connectionMethodForConnection(app, { ...existing, config }), asRecord(config.methodConfig));
+      }
       if (existing.transport === "mcp_remote")
         await assertRemoteConnectionEndpointsAllowed(config);
       if (existing.transport === "local_stdio")
@@ -18745,6 +18943,7 @@ export function toolAccessService(
           name: input.name ?? existing.name,
           status: input.status ?? existing.status,
           enabled: input.enabled ?? existing.enabled,
+          ...(input.agentInstructions !== undefined ? { agentInstructions: input.agentInstructions } : {}),
           config,
           transportConfig: isGoogleSheetsConnectionConfig(config)
             ? config

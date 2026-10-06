@@ -7,6 +7,19 @@ const run = (overrides: Partial<Run> = {}) => ({ resultJson: null, ...overrides 
 const collect = (error: unknown) => collectRunFailureDiagnostics(run(), { error });
 
 describe("run failure diagnostics", () => {
+  it("exports only the closed native model/auth rejection vocabulary", () => {
+    const diagnostic = { provider: "codex", category: "model_auth_incompatible", status: 400, authMode: "chatgpt" };
+    const result = sanitizeRunFailureDiagnostics(collectRunFailureDiagnostics(run({ resultJson: {
+      nativeProviderFailure: { ...diagnostic, model: "private-model", response: "private-provider-response", prompt: "private-prompt" },
+    } }), {}));
+    expect(result.provider).toEqual(diagnostic);
+    expect(JSON.stringify(result)).not.toContain("private");
+    for (const value of [null, [], { ...diagnostic, category: "private-category" },
+      Object.defineProperty({}, "provider", { get() { throw new Error("private"); } })]) {
+      expect(collectRunFailureDiagnostics(run({ resultJson: { nativeProviderFailure: value } }), {}).provider).toEqual({});
+    }
+  });
+
   it("selects bounded lock-owner evidence from a caught timeout cause", () => {
     const error = new Error("outer", { cause: Object.assign(new Error("lock timeout"), {
       code: "ERR_WORKSPACE_RESTORE_LOCK_TIMEOUT",
@@ -60,6 +73,7 @@ describe("run failure diagnostics", () => {
       workspaceRestoreFailure: "restore_failed",
       workspaceRestoreDiagnostic: {
         phase: "workspace", step: "git_integration", errorCode: "unknown", httpStatus: 503, exitCode: 1,
+        gitCommand: "merge_tree", gitFailureKind: "merge_conflict",
         message: "private command failed", path: "/private/workspace", stdout: "private file contents",
         cause: { code: "EIO", message: "private nested cause" },
       },
@@ -68,9 +82,23 @@ describe("run failure diagnostics", () => {
       workspaceRestoreFailure: "restore_failed", workspaceRestorePhase: "workspace",
       workspaceRestoreStep: "git_integration", workspaceRestoreErrorCode: "unknown",
       workspaceRestoreHttpStatus: 503, workspaceRestoreExitCode: 1,
+      workspaceRestoreGitCommand: "merge_tree", workspaceRestoreGitFailureKind: "merge_conflict",
     });
     expect(JSON.stringify(result)).not.toContain("private");
     expect(result.exceptions).toEqual([]);
+  });
+
+  it.each([
+    { phase: "asset", step: "git_integration", gitCommand: "merge_tree", gitFailureKind: "merge_conflict" },
+    { phase: "workspace", step: "git_import", gitCommand: "merge_tree", gitFailureKind: "merge_conflict" },
+    { phase: "workspace", step: "git_integration", gitCommand: "private-command", gitFailureKind: "private-output" },
+  ])("omits unrelated or unrecognized persisted Git labels (%j)", (diagnostic) => {
+    const result = collectRunFailureDiagnostics(run({ resultJson: {
+      workspaceRestoreFailure: "restore_failed", workspaceRestoreDiagnostic: diagnostic,
+    } }), {});
+    expect(result.execution).not.toHaveProperty("workspaceRestoreGitCommand");
+    expect(result.execution).not.toHaveProperty("workspaceRestoreGitFailureKind");
+    expect(JSON.stringify(result)).not.toContain("private-");
   });
 
   it("requires a known restore failure before reading its diagnostic", () => {
