@@ -1,3 +1,7 @@
+import { AiConnectionPoolConnector } from "@/components/ai-connections/AiConnectionPoolConnector";
+import { aiConnectionRouterPluginKey } from "@paperclipai/shared";
+import { ConnectionInstructionsSettings } from "@/features/connections/ConnectionInstructions";
+import { HonchoWorkspaceSettings } from "@/features/connections/HonchoWorkspaceSettings";
 import { BrowserUseSettingsPanel } from "./app-detail/BrowserUseSettingsPanel";
 import { isRetiredComposioConnection, RETIRED_COMPOSIO_MESSAGE, isRemoteMcpConnectorId, isRemoteMcpConnectorMethod } from "@paperclipai/shared";
 import { RemoteMcpManagement } from "@/features/connections/remote-mcp/RemoteMcpManagement";
@@ -72,8 +76,21 @@ import {
 
 export { connectionAddress, connectionTransportLabel };
 
-export function AppDetail({ renderActions, onReconnect }: {
+export function AppDetail(props: { renderActions?: (connection: ToolConnection) => ReactNode; renderAgentSettings?: (connection: ToolConnection) => ReactNode; renderConnectionSettings?: (connection: ToolConnection) => ReactNode; onReconnect?: (connection: ToolConnection) => void } = {}) {
+  const { connectionId = "" } = useParams<{ connectionId: string }>();
+  const connection = useQuery({ queryKey: queryKeys.tools.connection(connectionId), queryFn: () => toolsApi.getConnection(connectionId), enabled: !!connectionId });
+  if (connection.isPending) return <p role="status">Loading connection…</p>;
+  if (connection.error) return <p role="alert">{connection.error.message}</p>;
+  const pluginKey = connection.data && aiConnectionRouterPluginKey(connection.data);
+  return pluginKey ? <AiConnectionPoolConnector pluginKey={pluginKey} connection={connection.data} /> : <StandardAppDetail {...props} />;
+}
+
+function StandardAppDetail({ renderActions, renderAgentSettings, renderConnectionSettings, onReconnect }: {
   renderActions?: (connection: ToolConnection) => ReactNode;
+  /** Optional agent settings within Permissions, following the access controls. */
+  renderAgentSettings?: (connection: ToolConnection) => ReactNode;
+  /** Provider prerequisites shown before identity and agent access. */
+  renderConnectionSettings?: (connection: ToolConnection) => ReactNode;
   onReconnect?: (connection: ToolConnection) => void;
 } = {}) {
   const { connectionId = "", tab } = useParams<{ connectionId: string; tab?: string }>();
@@ -627,6 +644,8 @@ export function AppDetail({ renderActions, onReconnect }: {
           : <div className="space-y-10">
               {isAppAggregator(brandKey) && grantsQuery.data?.capabilities.canConfigure === true
                 ? <ConnectedAggregatorApps key={connection.id} connection={connection} /> : null}
+              {connection.config?.sourceTemplateKey === "honcho" && <HonchoWorkspaceSettings key={connection.id} connection={connection} canConfigure={grantsQuery.data?.capabilities?.canConfigure ?? false} />}
+              {renderConnectionSettings?.(connection)}
               {connection.config?.sourceTemplateKey === "browser-use-cloud" && <BrowserUseSettingsPanel connection={connection} grants={grantsQuery.data} />}
               {connection.config?.sourceTemplateKey === "railway" && <RailwayAccessPanel connection={connection} grants={grantsQuery.data} />}
               {connection.config?.provider === "agentmail" && <EmailConnectionInboxes companyId={connection.companyId} connectionId={connection.id} canConfigure={grantsQuery.data?.capabilities?.canConfigure ?? false} />}
@@ -667,6 +686,7 @@ export function AppDetail({ renderActions, onReconnect }: {
               </p> : null}
               {connection.config?.sourceTemplateKey !== "composio" && isRemoteMcpConnectorMethod(connection.config?.sourceTemplateKey, connection.config?.connectionMethodKey) && <p className="text-sm text-muted-foreground">Paperclip controls access to the tools listed here. App and action permissions inside these tools are managed in {baseAppName}.</p>}
               <PermissionsPanel
+                afterAgentAccess={<>{logoEntry?.agentInstructions && <ConnectionInstructionsSettings key={connection.id} connection={connection} provider={logoEntry.name} template={logoEntry.agentInstructions} canConfigure={grantsQuery.data?.capabilities?.canConfigure ?? false} />}{renderAgentSettings?.(connection)}</>}
                 actions={actionsContent}
                 connectionId={connectionId}
                 capabilities={grantsQuery.data?.capabilities}
@@ -718,7 +738,7 @@ export function AppDetail({ renderActions, onReconnect }: {
   );
 }
 
-function AppDetailHeader({
+export function AppDetailHeader({
   appName,
   connection,
   logoEntry,
@@ -726,6 +746,7 @@ function AppDetailHeader({
   allowRemoteLogo,
   status,
   actionCount,
+  canRename = true,
   renaming,
   nameDraft,
   renamePending,
@@ -741,6 +762,7 @@ function AppDetailHeader({
   allowRemoteLogo: boolean;
   status: StatusInfo;
   actionCount: number | null;
+  canRename?: boolean;
   renaming: boolean;
   nameDraft: string;
   renamePending: boolean;
@@ -792,6 +814,7 @@ function AppDetailHeader({
                 size="icon"
                 className="h-7 w-7 text-muted-foreground"
                 aria-label="Rename app"
+                disabled={!canRename}
                 onClick={onRenameStart}
               >
                 <Pencil className="h-3.5 w-3.5" />

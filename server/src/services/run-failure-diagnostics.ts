@@ -5,6 +5,7 @@ import { redactDiagnosticText } from "@paperclipai/adapter-utils/command-redacti
 import { sanitizeWorkspaceRestoreDiagnostic } from "@paperclipai/adapter-utils/workspace-restore-diagnostics";
 import { redactCurrentUserText } from "../log-redaction.js";
 import { redactSensitiveText, REDACTED_EVENT_VALUE } from "../redaction.js";
+import { readNativeModelRejectionDiagnostic } from "./native-runtime/native-provider-failure.js";
 
 type Run = typeof heartbeatRuns.$inferSelect;
 type Context = Record<string, string | number | boolean>;
@@ -175,6 +176,8 @@ export function collectRunFailureDiagnostics(run: Run, options: RunFailureReport
       if (diagnostic.step) execution.workspaceRestoreStep = diagnostic.step;
       if (diagnostic.httpStatus !== undefined) execution.workspaceRestoreHttpStatus = diagnostic.httpStatus;
       if (diagnostic.exitCode !== undefined) execution.workspaceRestoreExitCode = diagnostic.exitCode;
+      if (diagnostic.gitCommand) execution.workspaceRestoreGitCommand = diagnostic.gitCommand;
+      if (diagnostic.gitFailureKind) execution.workspaceRestoreGitFailureKind = diagnostic.gitFailureKind;
     }
   }
   const adapter = scalars(options.adapterErrorMeta, [
@@ -182,6 +185,8 @@ export function collectRunFailureDiagnostics(run: Run, options: RunFailureReport
     "stackPreview", "status", "statusCode", "requestId",
   ]);
   const provider = scalars(read(result, "terminalSessionFailure"), ["category", "title", "details"]);
+  const nativeProviderFailure = readNativeModelRejectionDiagnostic(read(result, "nativeProviderFailure"));
+  if (nativeProviderFailure) Object.assign(provider, nativeProviderFailure);
   const truncatedFields: string[] = [];
   const providerTruncation = read(read(result, "terminalSessionFailure"), "truncatedFields");
   if (Array.isArray(providerTruncation)) {

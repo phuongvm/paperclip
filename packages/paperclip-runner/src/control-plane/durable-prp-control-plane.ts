@@ -29,13 +29,12 @@ import type { Duplex } from "node:stream";
 import { fileURLToPath } from "node:url";
 
 import { NativeSessionProtocolIntegrityError } from "../contracts/native-session-backend.js";
-import { ACPX_CREDENTIAL_BINDING_ENV, ACPX_CREDENTIAL_NAMES } from "../drivers/acpx/environment.js";
+import { ACPX_CREDENTIAL_BINDING_ENV, ACPX_CREDENTIAL_NAMES, CLAUDE_ROUTING_ENV_KEYS } from "../drivers/acpx/environment.js";
 import { githubCredentialEnvironment } from "../github-credential-environment.js";
 import {
   validatePrpEvent,
   type PrpEvent,
 } from "../protocol/replay-contract.js";
-import { digestPaperclipSemanticContent } from "../semantic-tools/receipts.js";
 import {
   type DurableRecoveryCommittedEvent,
   type DurableRecoveryCoreCommand,
@@ -414,6 +413,18 @@ export const durableRecoveryInternals = Object.freeze({ canonicalJson });
 
 function canonicalDigest(value: unknown): string {
   return createHash("sha256").update(canonicalJson(value)).digest("hex");
+}
+
+function matchesSemanticInputDigest(input: unknown, digest: unknown): boolean {
+  try {
+    // Wire integrity covers the complete input, including protected fields.
+    // Receipt redaction can erase those differences and has a separate hash.
+    return digest === `sha256:${canonicalDigest(input)}`;
+  } catch {
+    // Canonicalization bounds must keep the same permanent integrity fence.
+    // Never attach an input-derived error or payload to the diagnostic.
+    return false;
+  }
 }
 
 function exactIdentity(value: unknown): value is DurableRecoveryIdentity {
@@ -3141,8 +3152,10 @@ export class DurablePrpControlPlane {
     if (
       isSemanticInput &&
       semantic !== undefined &&
-      (semantic.content as Record<string, unknown>).digest !==
-        digestPaperclipSemanticContent(semantic.input)
+      !matchesSemanticInputDigest(
+        semantic.input,
+        (semantic.content as Record<string, unknown>).digest,
+      )
     ) {
       // Only the authenticated, schema-valid, exactly correlated input may
       // permanently fail its owner. Never commit, dispatch, or ACK these bytes.
@@ -3358,6 +3371,13 @@ const runnerPlatformEnvironmentKeys = [
 ] as const;
 
 const runnerExplicitProviderEnvironmentKeys = [
+  ...ACPX_CREDENTIAL_NAMES.claude.filter(name => !name.startsWith("AWS_")),
+  ...CLAUDE_ROUTING_ENV_KEYS,
+  "PAPERCLIP_AI_PROVIDER_KEY",
+  "PAPERCLIP_AI_PROVIDER_URL",
+  "PAPERCLIP_AGENT_KEY_ID",
+  "PAPERCLIP_AGENT_PUBLIC_KEY",
+  "PAPERCLIP_AGENT_PRIVATE_KEY",
   ...ACPX_CREDENTIAL_NAMES.pi,
   ...ACPX_CREDENTIAL_NAMES.cursor,
   ...ACPX_CREDENTIAL_NAMES.copilot,
@@ -3414,6 +3434,11 @@ function runnerEnvironment(
     for (const key of runnerExplicitProviderEnvironmentKeys) {
       const value = explicitSource[key];
       if (value !== undefined) environment[key] = value;
+    }
+    if (explicitSource.CLAUDE_CODE_USE_BEDROCK === "1") {
+      for (const key of ["AWS_BEARER_TOKEN_BEDROCK"] as const) {
+        if (explicitSource[key] !== undefined) environment[key] = explicitSource[key];
+      }
     }
     Object.assign(environment, githubCredentialEnvironment(explicitSource));
   }

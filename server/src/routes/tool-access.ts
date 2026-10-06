@@ -1,3 +1,5 @@
+import { aiConnectionRouterPluginKey } from "@paperclipai/shared";
+import { aiConnectionRouterService } from "../services/ai-connection-router.js";
 import { composioAppSetupSchema, composioAppsRefreshSchema, composioAppsSyncSchema, composioAppAccountSchema } from "@paperclipai/shared";
 import { aggregatorAppsSyncSchema, aggregatorAppsRefreshSchema, arcadeDiscoverySetupSchema } from "@paperclipai/shared/aggregator-apps";
 import { Router, type Request, type Response } from "express";
@@ -856,9 +858,9 @@ function connectorEnrollmentPrincipal(req: Request): string {
             : "Vercel Connect setup is disabled on this Paperclip instance.",
         },
       },
-      apps: APP_STORE_DEFINITIONS.filter((app) => (enableMemoryConnectors || !isMemoryConnectorId(app.slug))).map((app) =>
+      apps: [...APP_STORE_DEFINITIONS.filter((app) => (enableMemoryConnectors || !isMemoryConnectorId(app.slug))).map((app) =>
         appWithPaperclipCloudConnectorAvailability(app, advertisedProfiles)
-      ),
+      ), ...await aiConnectionRouterService(db).catalog()],
     });
   });
 
@@ -897,6 +899,7 @@ function connectorEnrollmentPrincipal(req: Request): string {
     const resumedConnection = retainedConnectionId
       ? await svc.getConnection(retainedConnectionId, companyId)
       : null;
+    if (resumedConnection) await assertToolConnectionConfigureAccess(req, resumedConnection);
     const effectiveGrantKind = resumedConnection
       ? resumedConnection.credentialPolicy === "per_user"
         ? "user"
@@ -1687,6 +1690,7 @@ function connectorEnrollmentPrincipal(req: Request): string {
           status: connection.status,
           enabled: connection.enabled,
           credentialRefCount: (connection.credentialRefs ?? []).length + connection.credentialSecretRefs.length,
+          ...(req.body.agentInstructions !== undefined ? { agentInstructionsChanged: true, agentInstructionsEnabled: connection.agentInstructions?.enabled ?? false } : {}),
         },
       });
       res.status(201).json(connection);
@@ -2146,6 +2150,7 @@ function connectorEnrollmentPrincipal(req: Request): string {
     const existing = await getAccessibleResource(req, res, svc.getConnection(req.params.connectionId as string), "Tool connection not found");
     if (!existing) return;
     await assertToolConnectionConfigureAccess(req, existing);
+    if (aiConnectionRouterPluginKey(existing)) throw badRequest("Update this connection pool through its pool settings.");
     const connection = await svc.updateConnection(existing.id, req.body);
     const lifecycleChanges = classifyConnectionUpdate(
       { enabled: existing.enabled, config: existing.config },
@@ -2165,6 +2170,7 @@ function connectorEnrollmentPrincipal(req: Request): string {
         details: {
           status: connection.status,
           enabled: connection.enabled,
+          ...(req.body.agentInstructions !== undefined ? { agentInstructionsChanged: true, agentInstructionsEnabled: connection.agentInstructions?.enabled ?? false } : {}),
           credentialRefCount: (connection.credentialRefs ?? []).length + connection.credentialSecretRefs.length,
         },
       });
@@ -2177,6 +2183,7 @@ function connectorEnrollmentPrincipal(req: Request): string {
           details: {
             status: connection.status,
             enabled: connection.enabled,
+          ...(req.body.agentInstructions !== undefined ? { agentInstructionsChanged: true, agentInstructionsEnabled: connection.agentInstructions?.enabled ?? false } : {}),
             lifecycle: change.lifecycle,
             ...change.details,
           },
@@ -2190,6 +2197,7 @@ function connectorEnrollmentPrincipal(req: Request): string {
     const existing = await getAccessibleResource(req, res, svc.getConnection(req.params.connectionId as string), "Tool connection not found");
     if (!existing) return;
     await assertToolConnectionConfigureAccess(req, existing);
+    if (aiConnectionRouterPluginKey(existing)) throw badRequest("Remove this connection pool through its revision-checked pool settings.");
     const applicationBefore = await svc.getApplication(existing.applicationId);
     const { connection, removal } = await svc.archiveConnection(
       existing.id,
