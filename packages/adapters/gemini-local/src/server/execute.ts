@@ -1,4 +1,5 @@
 import { createProviderStoppedBoundary } from "@paperclipai/adapter-utils/provider-stopped-boundary";
+import { createUsageCheckpointLog } from "@paperclipai/adapter-utils/usage-checkpoint";
 import fs from "node:fs/promises";
 import type { Dirent } from "node:fs";
 import os from "node:os";
@@ -62,7 +63,7 @@ import {
   isGeminiTransientNetworkError,
   isGeminiTurnLimitResult,
   isGeminiSessionUnrecoverableError,
-  parseGeminiJsonl,
+  parseGeminiJsonl, createGeminiJsonlParser,
 } from "./parse.js";
 import { firstNonEmptyLine } from "./utils.js";
 import {
@@ -638,6 +639,11 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       });
     }
 
+    const consumeAccounting = createGeminiJsonlParser();
+    const accountingLog = createUsageCheckpointLog(onLog, ctx.onUsage, stdout => {
+      const parsed = consumeAccounting(stdout);
+      return { usage: parsed.usage, costUsd: parsed.costUsd, usageBasis: "per_run", provider: "google", biller: "google", billingType, model, complete: parsed.resultEvent !== null };
+    });
     const proc = await runAdapterExecutionTargetProcess(runId, runtimeExecutionTarget, command, args, {
       onProcessStopped: providerStop.beginInvocation(),
       cwd,
@@ -646,10 +652,11 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       graceSec,
       onSpawn,
       onRuntimeProgress: ctx.onRuntimeProgress,
-      onLog,
+      onLog: accountingLog,
       runLogTail: paperclipBridge?.runLogTail,
       settleRunDisposition: paperclipBridge?.settleRunDisposition,
     });
+    await accountingLog.flush();
     return {
       proc,
       parsed: parseGeminiJsonl(proc.stdout),
@@ -683,6 +690,14 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         exitCode: attempt.proc.exitCode,
         signal: attempt.proc.signal,
         timedOut: true,
+        usageComplete: attempt.parsed.resultEvent !== null,
+          usage: attempt.parsed.usage,
+          usageBasis: "per_run",
+          provider: "google",
+          biller: "google",
+          model,
+          billingType,
+          costUsd: attempt.parsed.costUsd,
         errorMessage: `Timed out after ${timeoutSec}s`,
         errorCode: authMeta.requiresAuth
           ? "gemini_auth_required"
@@ -739,6 +754,8 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       exitCode: attempt.proc.exitCode,
       signal: attempt.proc.signal,
       timedOut: false,
+      usageComplete: attempt.parsed.resultEvent !== null,
+      usageBasis: "per_run",
       errorMessage: failed ? fallbackErrorMessage : null,
       // Forward the transport-level error code from the run-disposition seam
       // first. A lost duplex control channel surfaces the typed

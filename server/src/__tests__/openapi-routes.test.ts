@@ -23,6 +23,7 @@ const apiPrefixes: Record<string, string> = {
   "agent-avatars.ts": "/api",
   "announcements.ts": "/api",
   "ai-connections.ts": "/api",
+  "decision-models.ts": "/api",
   "attention.ts": "/api",
   "approvals.ts": "/api",
   "assets.ts": "/api",
@@ -34,6 +35,7 @@ const apiPrefixes: Record<string, string> = {
   "slack-tools.ts": "/api",
   "email.ts": "/api",
   "cloud.ts": "/api/cloud",
+  "customer-success.ts": "/api/customer-success/v1",
   "companies.ts": "/api/companies",
   "company-skills.ts": "/api",
   "company-skill-policy.ts": "/api",
@@ -62,6 +64,7 @@ const apiPrefixes: Record<string, string> = {
   "plugin-ui-static.ts": "/api",
   "plugins.ts": "/api",
   "projects.ts": "/api",
+  "primary-agent.ts": "/api",
   "public-mcp.ts": "/api",
   "project-tools.ts": "/api",
   "resource-memberships.ts": "/api",
@@ -94,6 +97,11 @@ const HTTP_METHODS = new Set([
 const explicitOpenApiCoverageExclusions = new Set<string>();
 
 const explicitOpenApiOperationCoverageExclusions = new Set([
+  // Inspection uses its own versioned Cloud-permit/managed-run protocol,
+  // documented in CUSTOMER-SUCCESS-INSPECTION.md and the shared contract.
+  // Ordinary board sessions and agent API keys cannot invoke these endpoints.
+  "GET /api/customer-success/v1/run-authority",
+  "POST /api/customer-success/v1/read",
   // OAuth discovery and protocol endpoints have their own metadata contract;
   // browser connection-management operations remain documented in the board API.
   "GET /.well-known/oauth-authorization-server",
@@ -238,6 +246,19 @@ function loadSpecRoutes() {
 }
 
 describe("openapi routes", () => {
+  it("documents manager-only task privacy hints without protected scope identity", () => {
+    const spec = buildOpenApiSpec() as any;
+    const operation = spec.paths["/api/issues/{id}/privacy-constraints"].get;
+    const schema = operation.responses["200"].content["application/json"].schema;
+    expect(schema.properties).toEqual({
+      publicBlockedBy: { type: "string", enum: ["parent", "project"], nullable: true },
+      leavesPersonalProject: { type: "boolean" },
+    });
+    expect(schema.required).toEqual(["publicBlockedBy", "leavesPersonalProject"]);
+    expect(operation.responses["403"]).toBeDefined();
+    expect(operation.responses["404"]).toBeDefined();
+  });
+
   it("documents strict run-attributed feedback without a read endpoint", () => {
     const { spec } = loadSpecRoutes();
     const path = spec.paths["/api/companies/{companyId}/agent-commentary"];
@@ -788,6 +809,24 @@ describe("openapi routes", () => {
       extraInSpec: [],
       excludedRoutes: [...explicitOpenApiOperationCoverageExclusions].sort(),
     });
+  });
+
+  it("documents the authenticated personal primary-agent contract", () => {
+    const { spec } = loadSpecRoutes();
+    const path = spec.paths["/api/companies/{companyId}/primary-agent/me"];
+    for (const operation of [path.get, path.put]) {
+      expect(operation["x-paperclip-authorization"]).toEqual({ actor: "board" });
+      expect(operation.security).toEqual([{ BoardSessionAuth: [] }, { BoardApiKeyAuth: [] }]);
+      expect(operation.responses["200"].content["application/json"].schema.required).toEqual([
+        "companyId", "userId", "primaryAgentId", "initialized",
+      ]);
+    }
+    expect(path.put.requestBody.content["application/json"].schema).toMatchObject({
+      additionalProperties: false,
+      required: ["primaryAgentId"],
+      properties: { primaryAgentId: { type: "string", format: "uuid" } },
+    });
+    expect(path.put.responses["422"]).toBeDefined();
   });
 
   it("documents board-only repository discovery and selection", () => {
