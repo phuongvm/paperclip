@@ -517,6 +517,24 @@ Warm sandbox reuse must match the current host Git tip and branch as well as the
 file snapshot and saved stamp, including managed nested repositories. A history
 or branch mismatch restages the host before the next run begins.
 
+### Remote Codex model compatibility
+
+Fresh remote Codex Runner runs check the selected image CLI before saving the
+native execution input. If the CLI is in the supported app-server version window
+but below the selected model's verified minimum, preparation chooses the newest
+compatible older model of the same class (`sol`, `luna`, `astra`, or `terra`),
+then the stable Runner default. Each candidate is considered once; this selection
+does not replay a provider turn or consume a failure-retry attempt.
+
+The effective model is saved in the execution input before checkpoint selection,
+so launch, recovery, and usage accounting share that identity. The requested
+agent and task settings stay unchanged. A task warning and `runner.model_fallback`
+run-log event name both models and the image CLI version. An explicit remote
+Codex artifact or npm install pin retains precedence. Persisted executions are
+not rewritten, and unknown models, invalid CLI builds, and artifact failures keep
+their existing verification and recovery rules. Capacity and authentication
+failures do not trigger this startup substitution.
+
 ### Native provider model capacity
 
 A committed Codex `turn.failed` event with `codexErrorInfo: serverOverloaded`,
@@ -1468,6 +1486,19 @@ and the old local process or remote environment has a verified stop record,
 Paperclip submits saved input through normal task admission, once, with the
 original user's authority. Pauses, task ownership, budgets, approvals, and
 execution recovery holds still apply. Unconfirmed cleanup does not start work.
+
+A Stop from a bound Slack session records the verified user's identity, just as
+a board Stop does. Native cancellation can then recognize the acknowledged
+operator Stop instead of creating an execution recovery hold. An AI login request
+addressed to another user does not gate a fresh user turn or that run's completion.
+The request remains pending and grants no access. Requests for the current user,
+requests without a known addressee or responsible user, tool permissions, and
+approvals retain their gates.
+
+For a cancelled native run with an execution recovery hold, an undelivered user
+message posted after the run finished can authorize a fresh turn through the
+same continuation checks as a new message. A message from before the Stop cannot
+authorize that continuation by itself. Previously delivered messages stay excluded.
 
 The active session advertises steering only when its driver supports it. A
 transport method that rejects steering does not grant that capability. The
