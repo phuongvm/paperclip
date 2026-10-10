@@ -715,6 +715,11 @@ a real mention. **Done** finishes setup once webhook verification and required
 account linking are complete, whether or not a test message was sent. The
 separate strict connection-test API retains its conversation and delivery checks.
 
+New Slack conversations receive default communication guidance that requires a
+clickable link to each task the agent creates. Agents use the public task URL
+from Paperclip tools or task context and report when a link is unavailable.
+Existing conversations keep their original communication guidance snapshot.
+
 ### Chat activity pagination and callback diagnostics
 
 The connection Activity tab loads 25 records per page. `GET /api/chat-endpoints/:id/activity?limit=25`
@@ -1345,6 +1350,32 @@ Completion reads the shared Stop barriers, uses live output getters, and reports
 trace finalization immediately so a later error cannot lose cleanup state.
 Existing public failure helpers remain re-exported by `heartbeat.ts`.
 Keep completion policy changes separate from this extraction and dispatch.
+
+Runtime selection is in `server/src/services/heartbeat/runtime-selection.ts`.
+`selectHeartbeatRuntime` constructs or restores native execution inputs, selects
+completion contracts and sessions, and persists native or legacy runtime choices.
+Native selection retains the row lock that serializes it with cancellation and
+controller lease renewal. The executor receives an explicit selection result;
+lifecycle and ownership callbacks update its teardown state immediately, including
+when preparation later throws. Public sandbox lifecycle and model fallback helpers
+remain re-exported by `heartbeat.ts`.
+
+Workspace preparation is in `server/src/services/heartbeat/workspace-preparation.ts`.
+`prepareHeartbeatWorkspace` resolves and provisions the workspace, persists its
+metadata and issue binding, then acquires and realizes the execution environment.
+It preserves the immutable workspace binding used by native recovery and records
+preparation spans even when acquisition or realization fails. The executor retains
+environment selection, dispatch gates, and terminal lease cleanup. Persistence
+failures still clean newly created workspace artifacts before propagating.
+
+Runtime execution is in `server/src/services/heartbeat/runtime-execution.ts`.
+`executeHeartbeatRuntime` dispatches a prepared native session or legacy adapter,
+captures usage, finalizes workspace operations, and releases gateway tokens and
+instruction copies. The executor supplies the atomic dispatch gate and retains
+admission, terminal run status, retry handling, and outer lease cleanup. An explicit
+dispatch result preserves early cancellation returns; ownership callbacks update
+teardown state before errors propagate. Instruction getters retain updates made
+during provider execution. Keep policy changes separate from this extraction.
 
 ## Wake Context Delivery
 

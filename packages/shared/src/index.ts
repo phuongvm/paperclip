@@ -1245,6 +1245,7 @@ export type {
   DocumentFormat,
   LegacyPlanDocument,
   IssueAttachment,
+  IssueCreationSource,
   IssueLabel,
   IssueTreeControlPreview,
   IssueTreeHold,
@@ -2805,6 +2806,8 @@ export type { ExecutionContinuationEnvelope } from "./types/execution-continuati
 export type { ExecutionProjection, ExecutionReconciliation, ExecutionBlocker } from "./types/execution-projection.js";
 
 export { EXECUTION_RECONCILIATION_CAUSES, requiresExecutionReconciliation } from "./types/execution-projection.js";
+export * from "./types/voice-sessions.js";
+export * from "./validators/voice-sessions.js";
 
 export * from "./agent-appearance.js";
 export * from "./ai-connections.js";
@@ -2866,3 +2869,5 @@ export { EXTERNAL_AGENT_TOOL_GUIDANCE, DOT_AGENT_TOOL_GUIDANCE } from "./externa
 export { AGENT_LIFECYCLE_STATES, type AgentLifecycleState, type AgentLifecycleOperation } from "./types/agent-lifecycle.js";
 
 export type { AgentLifecycleRequest, AgentLifecycleResult } from "./types/agent-lifecycle.js";
+
+export * from "./fast-response.js";
