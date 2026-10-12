@@ -9,7 +9,7 @@ import {
   useState,
 } from "react";
 import { flushSync } from "react-dom";
-import type { ReactNode } from "react";
+import type { ComponentProps, ReactNode } from "react";
 import { createRoot } from "react-dom/client";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -375,6 +375,22 @@ function createFileDragEvent(type: string, files: File[]) {
 describe("IssueChatThread", () => {
   let container: HTMLDivElement;
 
+  function renderIssueThread(root: ReturnType<typeof createRoot>, props: Partial<ComponentProps<typeof IssueChatThread>> = {}) {
+    root.render(
+      <MemoryRouter>
+        <IssueChatThread
+          comments={[]}
+          linkedRuns={[]}
+          timelineEvents={[]}
+          liveRuns={[]}
+          onAdd={async () => {}}
+          enableLiveTranscriptPolling={false}
+          {...props}
+        />
+      </MemoryRouter>,
+    );
+  }
+
   beforeEach(() => {
     container = document.createElement("div");
     document.body.appendChild(container);
@@ -398,19 +414,9 @@ describe("IssueChatThread", () => {
     const root = createRoot(container);
 
     act(() => {
-      root.render(
-        <MemoryRouter>
-          <IssueChatThread
-            comments={[]}
-            linkedRuns={[]}
-            timelineEvents={[]}
-            liveRuns={[]}
-            onAdd={async () => {}}
-            showComposer={false}
-            enableLiveTranscriptPolling={false}
-          />
-        </MemoryRouter>,
-      );
+      renderIssueThread(root, {
+        showComposer: false,
+      });
     });
 
     expect(container.textContent).toContain("Jump to latest");
@@ -431,36 +437,27 @@ describe("IssueChatThread", () => {
   it("labels incoming iMessage bubbles without labeling board replies", () => {
     const root = createRoot(container);
     act(() => {
-      root.render(
-        <MemoryRouter>
-          <IssueChatThread
-            comments={["imessage", "board"].map((source) => ({
-              id: `comment-${source}`,
-              companyId: "company-1",
-              issueId: "issue-1",
-              authorAgentId: null,
-              authorUserId: "user-board",
-              authorType: "user" as const,
-              body: `Reply from ${source}`,
-              presentation: null,
-              metadata: source === "imessage" ? {
-                version: 1 as const,
-                sourceChannel: "imessage-photon" as const,
-                sections: [{ title: "iMessage Photon sender", rows: [{ type: "text" as const, text: "Linked person" }] }],
-              } : null,
-              createdAt: new Date("2026-09-12T12:00:00Z"),
-              updatedAt: new Date("2026-09-12T12:00:00Z"),
-            }))}
-            linkedRuns={[]}
-            timelineEvents={[]}
-            liveRuns={[]}
-            currentUserId="user-board"
-            onAdd={async () => {}}
-            showComposer={false}
-            enableLiveTranscriptPolling={false}
-          />
-        </MemoryRouter>,
-      );
+      renderIssueThread(root, {
+        comments: ["imessage", "board"].map((source) => ({
+          id: `comment-${source}`,
+          companyId: "company-1",
+          issueId: "issue-1",
+          authorAgentId: null,
+          authorUserId: "user-board",
+          authorType: "user" as const,
+          body: `Reply from ${source}`,
+          presentation: null,
+          metadata: source === "imessage" ? {
+            version: 1 as const,
+            sourceChannel: "imessage-photon" as const,
+            sections: [{ title: "iMessage Photon sender", rows: [{ type: "text" as const, text: "Linked person" }] }],
+          } : null,
+          createdAt: new Date("2026-09-12T12:00:00Z"),
+          updatedAt: new Date("2026-09-12T12:00:00Z"),
+        })),
+        currentUserId: "user-board",
+        showComposer: false,
+      });
     });
     expect(container.querySelector("#comment-comment-imessage")?.textContent).toContain("Sent from iMessage");
     expect(container.querySelector("#comment-comment-board")?.textContent).not.toContain("Sent from iMessage");
@@ -471,34 +468,25 @@ describe("IssueChatThread", () => {
     const root = createRoot(container);
 
     act(() => {
-      root.render(
-        <MemoryRouter>
-          <IssueChatThread
-            comments={[
-              {
-                id: "comment-current-user",
-                companyId: "company-1",
-                issueId: "issue-1",
-                authorAgentId: null,
-                authorUserId: "user-board",
-                authorType: "user",
-                body: "1. **Readable** markdown on blue",
-                presentation: null,
-                metadata: null,
-                createdAt: new Date("2026-04-06T12:00:00.000Z"),
-                updatedAt: new Date("2026-04-06T12:00:00.000Z"),
-              },
-            ]}
-            linkedRuns={[]}
-            timelineEvents={[]}
-            liveRuns={[]}
-            currentUserId="user-board"
-            onAdd={async () => {}}
-            showComposer={false}
-            enableLiveTranscriptPolling={false}
-          />
-        </MemoryRouter>,
-      );
+      renderIssueThread(root, {
+        comments: [
+          {
+            id: "comment-current-user",
+            companyId: "company-1",
+            issueId: "issue-1",
+            authorAgentId: null,
+            authorUserId: "user-board",
+            authorType: "user",
+            body: "1. **Readable** markdown on blue",
+            presentation: null,
+            metadata: null,
+            createdAt: new Date("2026-04-06T12:00:00.000Z"),
+            updatedAt: new Date("2026-04-06T12:00:00.000Z"),
+          },
+        ],
+        currentUserId: "user-board",
+        showComposer: false,
+      });
     });
 
     expect(markdownBodyRenderMock).toHaveBeenCalledWith(
@@ -543,19 +531,10 @@ describe("IssueChatThread", () => {
     ];
 
     act(() => {
-      root.render(
-        <MemoryRouter>
-          <IssueChatThread
-            comments={[]}
-            linkedRuns={linkedRuns}
-            timelineEvents={[]}
-            liveRuns={[]}
-            onAdd={async () => {}}
-            showComposer={false}
-            enableLiveTranscriptPolling={false}
-          />
-        </MemoryRouter>,
-      );
+      renderIssueThread(root, {
+        linkedRuns: linkedRuns,
+        showComposer: false,
+      });
     });
 
     expect(container.textContent).toContain(
@@ -603,33 +582,24 @@ describe("IssueChatThread", () => {
       const root = createRoot(container);
 
       act(() => {
-        root.render(
-          <MemoryRouter>
-            <IssueChatThread
-              comments={[
-                {
-                  id: "comment-copy",
-                  companyId: "company-1",
-                  issueId: "issue-1",
-                  authorAgentId: null,
-                  authorUserId: "user-1",
-                  authorType: "user",
-                  body: "Copy this comment",
-                  presentation: null,
-                  metadata: null,
-                  createdAt: new Date("2026-04-06T12:00:00.000Z"),
-                  updatedAt: new Date("2026-04-06T12:00:00.000Z"),
-                },
-              ]}
-              linkedRuns={[]}
-              timelineEvents={[]}
-              liveRuns={[]}
-              onAdd={async () => {}}
-              showComposer={false}
-              enableLiveTranscriptPolling={false}
-            />
-          </MemoryRouter>,
-        );
+        renderIssueThread(root, {
+          comments: [
+            {
+              id: "comment-copy",
+              companyId: "company-1",
+              issueId: "issue-1",
+              authorAgentId: null,
+              authorUserId: "user-1",
+              authorType: "user",
+              body: "Copy this comment",
+              presentation: null,
+              metadata: null,
+              createdAt: new Date("2026-04-06T12:00:00.000Z"),
+              updatedAt: new Date("2026-04-06T12:00:00.000Z"),
+            },
+          ],
+          showComposer: false,
+        });
       });
 
       const copyButton = container.querySelector(
@@ -674,20 +644,10 @@ describe("IssueChatThread", () => {
     const root = createRoot(container);
 
     act(() => {
-      root.render(
-        <MemoryRouter>
-          <IssueChatThread
-            comments={[]}
-            linkedRuns={[]}
-            timelineEvents={[]}
-            liveRuns={[]}
-            onAdd={async () => {}}
-            showComposer={false}
-            enableLiveTranscriptPolling={false}
-            footer={<div>Sibling footer</div>}
-          />
-        </MemoryRouter>,
-      );
+      renderIssueThread(root, {
+        showComposer: false,
+        footer: <div>Sibling footer</div>,
+      });
     });
 
     const viewport = container.querySelector('[data-testid="thread-viewport"]');
@@ -709,20 +669,10 @@ describe("IssueChatThread", () => {
     const root = createRoot(container);
 
     act(() => {
-      root.render(
-        <MemoryRouter>
-          <IssueChatThread
-            comments={[]}
-            linkedRuns={[]}
-            timelineEvents={[]}
-            liveRuns={[]}
-            issueWorkMode="planning"
-            onWorkModeChange={() => {}}
-            onAdd={async () => {}}
-            enableLiveTranscriptPolling={false}
-          />
-        </MemoryRouter>,
-      );
+      renderIssueThread(root, {
+        issueWorkMode: "planning",
+        onWorkModeChange: () => {},
+      });
     });
 
     const composer = container.querySelector(
@@ -749,20 +699,10 @@ describe("IssueChatThread", () => {
     const onWorkModeChange = vi.fn();
 
     act(() => {
-      root.render(
-        <MemoryRouter>
-          <IssueChatThread
-            comments={[]}
-            linkedRuns={[]}
-            timelineEvents={[]}
-            liveRuns={[]}
-            issueWorkMode="standard"
-            onWorkModeChange={onWorkModeChange}
-            onAdd={async () => {}}
-            enableLiveTranscriptPolling={false}
-          />
-        </MemoryRouter>,
-      );
+      renderIssueThread(root, {
+        issueWorkMode: "standard",
+        onWorkModeChange: onWorkModeChange,
+      });
     });
 
     expect(container.querySelector('[data-testid="issue-chat-composer-work-mode-chip"]')).toBeNull();
@@ -809,20 +749,10 @@ describe("IssueChatThread", () => {
     const onWorkModeChange = vi.fn();
 
     act(() => {
-      root.render(
-        <MemoryRouter>
-          <IssueChatThread
-            comments={[]}
-            linkedRuns={[]}
-            timelineEvents={[]}
-            liveRuns={[]}
-            issueWorkMode="standard"
-            onWorkModeChange={onWorkModeChange}
-            onAdd={async () => {}}
-            enableLiveTranscriptPolling={false}
-          />
-        </MemoryRouter>,
-      );
+      renderIssueThread(root, {
+        issueWorkMode: "standard",
+        onWorkModeChange: onWorkModeChange,
+      });
     });
 
     const add = container.querySelector('[data-testid="issue-chat-composer-add"]') as HTMLButtonElement;
@@ -874,19 +804,9 @@ describe("IssueChatThread", () => {
     const root = createRoot(container);
 
     act(() => {
-      root.render(
-        <MemoryRouter>
-          <IssueChatThread
-            comments={[]}
-            linkedRuns={[]}
-            timelineEvents={[]}
-            liveRuns={[]}
-            issueWorkMode="standard"
-            onAdd={async () => {}}
-            enableLiveTranscriptPolling={false}
-          />
-        </MemoryRouter>,
-      );
+      renderIssueThread(root, {
+        issueWorkMode: "standard",
+      });
     });
 
     const composer = container.querySelector(
@@ -930,27 +850,19 @@ describe("IssueChatThread", () => {
     );
 
     act(() => {
-      root.render(
-        <MemoryRouter>
-          <IssueChatThread
-            comments={issueChatLongThreadComments}
-            linkedRuns={issueChatLongThreadLinkedRuns}
-            timelineEvents={issueChatLongThreadEvents}
-            liveRuns={[]}
-            agentMap={issueChatLongThreadAgentMap}
-            currentUserId="user-board"
-            onAdd={async () => {}}
-            showComposer={false}
-            showJumpToLatest={false}
-            autoScrollToHashOnInitialLoad
-            enableLiveTranscriptPolling={false}
-            transcriptsByRunId={issueChatLongThreadTranscriptsByRunId}
-            hasOutputForRun={(runId) =>
-              issueChatLongThreadTranscriptsByRunId.has(runId)
-            }
-          />
-        </MemoryRouter>,
-      );
+      renderIssueThread(root, {
+        comments: issueChatLongThreadComments,
+        linkedRuns: issueChatLongThreadLinkedRuns,
+        timelineEvents: issueChatLongThreadEvents,
+        agentMap: issueChatLongThreadAgentMap,
+        currentUserId: "user-board",
+        showComposer: false,
+        showJumpToLatest: false,
+        autoScrollToHashOnInitialLoad: true,
+        transcriptsByRunId: issueChatLongThreadTranscriptsByRunId,
+        hasOutputForRun: (runId) =>
+          issueChatLongThreadTranscriptsByRunId.has(runId),
+      });
     });
 
     const virtualizer = container.querySelector(
@@ -989,26 +901,18 @@ describe("IssueChatThread", () => {
       });
 
     act(() => {
-      root.render(
-        <MemoryRouter>
-          <IssueChatThread
-            comments={issueChatLongThreadComments}
-            linkedRuns={issueChatLongThreadLinkedRuns}
-            timelineEvents={issueChatLongThreadEvents}
-            liveRuns={[]}
-            agentMap={issueChatLongThreadAgentMap}
-            currentUserId="user-board"
-            onAdd={async () => {}}
-            showComposer={false}
-            showJumpToLatest={false}
-            enableLiveTranscriptPolling={false}
-            transcriptsByRunId={issueChatLongThreadTranscriptsByRunId}
-            hasOutputForRun={(runId) =>
-              issueChatLongThreadTranscriptsByRunId.has(runId)
-            }
-          />
-        </MemoryRouter>,
-      );
+      renderIssueThread(root, {
+        comments: issueChatLongThreadComments,
+        linkedRuns: issueChatLongThreadLinkedRuns,
+        timelineEvents: issueChatLongThreadEvents,
+        agentMap: issueChatLongThreadAgentMap,
+        currentUserId: "user-board",
+        showComposer: false,
+        showJumpToLatest: false,
+        transcriptsByRunId: issueChatLongThreadTranscriptsByRunId,
+        hasOutputForRun: (runId) =>
+          issueChatLongThreadTranscriptsByRunId.has(runId),
+      });
     });
 
     const virtualRows = container.querySelectorAll<HTMLDivElement>(
@@ -1099,24 +1003,16 @@ describe("IssueChatThread", () => {
       .mockImplementation(() => {});
 
     act(() => {
-      root.render(
-        <MemoryRouter>
-          <IssueChatThread
-            comments={issueChatLongThreadComments}
-            linkedRuns={issueChatLongThreadLinkedRuns}
-            timelineEvents={issueChatLongThreadEvents}
-            liveRuns={[]}
-            agentMap={issueChatLongThreadAgentMap}
-            currentUserId="user-board"
-            onAdd={async () => {}}
-            enableLiveTranscriptPolling={false}
-            transcriptsByRunId={issueChatLongThreadTranscriptsByRunId}
-            hasOutputForRun={(runId) =>
-              issueChatLongThreadTranscriptsByRunId.has(runId)
-            }
-          />
-        </MemoryRouter>,
-      );
+      renderIssueThread(root, {
+        comments: issueChatLongThreadComments,
+        linkedRuns: issueChatLongThreadLinkedRuns,
+        timelineEvents: issueChatLongThreadEvents,
+        agentMap: issueChatLongThreadAgentMap,
+        currentUserId: "user-board",
+        transcriptsByRunId: issueChatLongThreadTranscriptsByRunId,
+        hasOutputForRun: (runId) =>
+          issueChatLongThreadTranscriptsByRunId.has(runId),
+      });
     });
 
     const jump = Array.from(container.querySelectorAll("button")).find(
@@ -1163,24 +1059,16 @@ describe("IssueChatThread", () => {
       elementScrollToMock as unknown as typeof scrollHost.scrollTo;
 
     act(() => {
-      root.render(
-        <MemoryRouter>
-          <IssueChatThread
-            comments={issueChatLongThreadComments}
-            linkedRuns={issueChatLongThreadLinkedRuns}
-            timelineEvents={issueChatLongThreadEvents}
-            liveRuns={[]}
-            agentMap={issueChatLongThreadAgentMap}
-            currentUserId="user-board"
-            onAdd={async () => {}}
-            enableLiveTranscriptPolling={false}
-            transcriptsByRunId={issueChatLongThreadTranscriptsByRunId}
-            hasOutputForRun={(runId) =>
-              issueChatLongThreadTranscriptsByRunId.has(runId)
-            }
-          />
-        </MemoryRouter>,
-      );
+      renderIssueThread(root, {
+        comments: issueChatLongThreadComments,
+        linkedRuns: issueChatLongThreadLinkedRuns,
+        timelineEvents: issueChatLongThreadEvents,
+        agentMap: issueChatLongThreadAgentMap,
+        currentUserId: "user-board",
+        transcriptsByRunId: issueChatLongThreadTranscriptsByRunId,
+        hasOutputForRun: (runId) =>
+          issueChatLongThreadTranscriptsByRunId.has(runId),
+      });
     });
 
     const jump = Array.from(container.querySelectorAll("button")).find(
@@ -1235,24 +1123,16 @@ describe("IssueChatThread", () => {
 
     const root = createRoot(container);
     act(() => {
-      root.render(
-        <MemoryRouter>
-          <IssueChatThread
-            comments={issueChatLongThreadComments}
-            linkedRuns={issueChatLongThreadLinkedRuns}
-            timelineEvents={issueChatLongThreadEvents}
-            liveRuns={[]}
-            agentMap={issueChatLongThreadAgentMap}
-            currentUserId="user-board"
-            onAdd={async () => {}}
-            enableLiveTranscriptPolling={false}
-            transcriptsByRunId={issueChatLongThreadTranscriptsByRunId}
-            hasOutputForRun={(runId) =>
-              issueChatLongThreadTranscriptsByRunId.has(runId)
-            }
-          />
-        </MemoryRouter>,
-      );
+      renderIssueThread(root, {
+        comments: issueChatLongThreadComments,
+        linkedRuns: issueChatLongThreadLinkedRuns,
+        timelineEvents: issueChatLongThreadEvents,
+        agentMap: issueChatLongThreadAgentMap,
+        currentUserId: "user-board",
+        transcriptsByRunId: issueChatLongThreadTranscriptsByRunId,
+        hasOutputForRun: (runId) =>
+          issueChatLongThreadTranscriptsByRunId.has(runId),
+      });
     });
 
     const jump = Array.from(container.querySelectorAll("button")).find(
@@ -1318,24 +1198,16 @@ describe("IssueChatThread", () => {
 
     const root = createRoot(container);
     act(() => {
-      root.render(
-        <MemoryRouter>
-          <IssueChatThread
-            comments={issueChatLongThreadComments}
-            linkedRuns={issueChatLongThreadLinkedRuns}
-            timelineEvents={issueChatLongThreadEvents}
-            liveRuns={[]}
-            agentMap={issueChatLongThreadAgentMap}
-            currentUserId="user-board"
-            onAdd={async () => {}}
-            enableLiveTranscriptPolling={false}
-            transcriptsByRunId={issueChatLongThreadTranscriptsByRunId}
-            hasOutputForRun={(runId) =>
-              issueChatLongThreadTranscriptsByRunId.has(runId)
-            }
-          />
-        </MemoryRouter>,
-      );
+      renderIssueThread(root, {
+        comments: issueChatLongThreadComments,
+        linkedRuns: issueChatLongThreadLinkedRuns,
+        timelineEvents: issueChatLongThreadEvents,
+        agentMap: issueChatLongThreadAgentMap,
+        currentUserId: "user-board",
+        transcriptsByRunId: issueChatLongThreadTranscriptsByRunId,
+        hasOutputForRun: (runId) =>
+          issueChatLongThreadTranscriptsByRunId.has(runId),
+      });
     });
 
     // No jump click: initial render should preserve the page position.
@@ -1376,24 +1248,16 @@ describe("IssueChatThread", () => {
 
     const root = createRoot(container);
     act(() => {
-      root.render(
-        <MemoryRouter>
-          <IssueChatThread
-            comments={issueChatLongThreadComments}
-            linkedRuns={issueChatLongThreadLinkedRuns}
-            timelineEvents={issueChatLongThreadEvents}
-            liveRuns={[]}
-            agentMap={issueChatLongThreadAgentMap}
-            currentUserId="user-board"
-            onAdd={async () => {}}
-            enableLiveTranscriptPolling={false}
-            transcriptsByRunId={issueChatLongThreadTranscriptsByRunId}
-            hasOutputForRun={(runId) =>
-              issueChatLongThreadTranscriptsByRunId.has(runId)
-            }
-          />
-        </MemoryRouter>,
-      );
+      renderIssueThread(root, {
+        comments: issueChatLongThreadComments,
+        linkedRuns: issueChatLongThreadLinkedRuns,
+        timelineEvents: issueChatLongThreadEvents,
+        agentMap: issueChatLongThreadAgentMap,
+        currentUserId: "user-board",
+        transcriptsByRunId: issueChatLongThreadTranscriptsByRunId,
+        hasOutputForRun: (runId) =>
+          issueChatLongThreadTranscriptsByRunId.has(runId),
+      });
     });
 
     act(() => {
@@ -1542,22 +1406,15 @@ describe("IssueChatThread", () => {
 
     const root = createRoot(container);
     act(() => {
-      root.render(
-        <MemoryRouter>
-          <IssueChatThread
-            comments={issueChatLongThreadComments}
-            linkedRuns={linkedRuns}
-            timelineEvents={issueChatLongThreadEvents}
-            liveRuns={[]}
-            agentMap={issueChatLongThreadAgentMap}
-            currentUserId="user-board"
-            onAdd={async () => {}}
-            enableLiveTranscriptPolling={false}
-            transcriptsByRunId={transcriptsByRunId}
-            hasOutputForRun={(runId) => transcriptsByRunId.has(runId)}
-          />
-        </MemoryRouter>,
-      );
+      renderIssueThread(root, {
+        comments: issueChatLongThreadComments,
+        linkedRuns: linkedRuns,
+        timelineEvents: issueChatLongThreadEvents,
+        agentMap: issueChatLongThreadAgentMap,
+        currentUserId: "user-board",
+        transcriptsByRunId: transcriptsByRunId,
+        hasOutputForRun: (runId) => transcriptsByRunId.has(runId),
+      });
     });
 
     const virtualizerEl = container.querySelector<HTMLDivElement>(
@@ -1610,21 +1467,12 @@ describe("IssueChatThread", () => {
 
     const root = createRoot(container);
     act(() => {
-      root.render(
-        <MemoryRouter>
-          <IssueChatThread
-            comments={directComments}
-            linkedRuns={[]}
-            timelineEvents={[]}
-            liveRuns={[]}
-            agentMap={issueChatLongThreadAgentMap}
-            currentUserId="user-board"
-            onAdd={async () => {}}
-            enableLiveTranscriptPolling={false}
-            onRefreshLatestComments={refreshMock}
-          />
-        </MemoryRouter>,
-      );
+      renderIssueThread(root, {
+        comments: directComments,
+        agentMap: issueChatLongThreadAgentMap,
+        currentUserId: "user-board",
+        onRefreshLatestComments: refreshMock,
+      });
     });
 
     const jump = Array.from(container.querySelectorAll("button")).find(
@@ -1744,22 +1592,13 @@ describe("IssueChatThread", () => {
     const directComments = issueChatLongThreadComments.slice(0, 12);
 
     act(() => {
-      root.render(
-        <MemoryRouter>
-          <IssueChatThread
-            comments={directComments}
-            linkedRuns={[]}
-            timelineEvents={[]}
-            liveRuns={[]}
-            agentMap={issueChatLongThreadAgentMap}
-            currentUserId="user-board"
-            onAdd={async () => {}}
-            showComposer={false}
-            showJumpToLatest={false}
-            enableLiveTranscriptPolling={false}
-          />
-        </MemoryRouter>,
-      );
+      renderIssueThread(root, {
+        comments: directComments,
+        agentMap: issueChatLongThreadAgentMap,
+        currentUserId: "user-board",
+        showComposer: false,
+        showJumpToLatest: false,
+      });
     });
 
     expect(
@@ -1810,26 +1649,18 @@ describe("IssueChatThread", () => {
     const root = createRoot(container);
 
     act(() => {
-      root.render(
-        <MemoryRouter>
-          <IssueChatThread
-            comments={issueChatLongThreadComments}
-            linkedRuns={issueChatLongThreadLinkedRuns}
-            timelineEvents={issueChatLongThreadEvents}
-            liveRuns={[]}
-            agentMap={issueChatLongThreadAgentMap}
-            currentUserId="user-board"
-            onAdd={async () => {}}
-            showComposer={false}
-            showJumpToLatest={false}
-            enableLiveTranscriptPolling={false}
-            transcriptsByRunId={issueChatLongThreadTranscriptsByRunId}
-            hasOutputForRun={(runId) =>
-              issueChatLongThreadTranscriptsByRunId.has(runId)
-            }
-          />
-        </MemoryRouter>,
-      );
+      renderIssueThread(root, {
+        comments: issueChatLongThreadComments,
+        linkedRuns: issueChatLongThreadLinkedRuns,
+        timelineEvents: issueChatLongThreadEvents,
+        agentMap: issueChatLongThreadAgentMap,
+        currentUserId: "user-board",
+        showComposer: false,
+        showJumpToLatest: false,
+        transcriptsByRunId: issueChatLongThreadTranscriptsByRunId,
+        hasOutputForRun: (runId) =>
+          issueChatLongThreadTranscriptsByRunId.has(runId),
+      });
     });
 
     const rows = container.querySelectorAll(
@@ -1860,48 +1691,36 @@ describe("IssueChatThread", () => {
       issueChatLongThreadTranscriptsByRunId.has(runId);
 
     act(() => {
-      root.render(
-        <MemoryRouter>
-          <IssueChatThread
-            comments={issueChatLongThreadComments}
-            linkedRuns={issueChatLongThreadLinkedRuns}
-            timelineEvents={issueChatLongThreadEvents}
-            liveRuns={[]}
-            agentMap={issueChatLongThreadAgentMap}
-            currentUserId="user-board"
-            onAdd={onAdd}
-            showComposer={false}
-            showJumpToLatest={false}
-            enableLiveTranscriptPolling={false}
-            transcriptsByRunId={issueChatLongThreadTranscriptsByRunId}
-            hasOutputForRun={hasOutputForRun}
-          />
-        </MemoryRouter>,
-      );
+      renderIssueThread(root, {
+        comments: issueChatLongThreadComments,
+        linkedRuns: issueChatLongThreadLinkedRuns,
+        timelineEvents: issueChatLongThreadEvents,
+        agentMap: issueChatLongThreadAgentMap,
+        currentUserId: "user-board",
+        onAdd: onAdd,
+        showComposer: false,
+        showJumpToLatest: false,
+        transcriptsByRunId: issueChatLongThreadTranscriptsByRunId,
+        hasOutputForRun: hasOutputForRun,
+      });
     });
 
     expect(markdownBodyRenderMock).toHaveBeenCalled();
     markdownBodyRenderMock.mockClear();
 
     act(() => {
-      root.render(
-        <MemoryRouter>
-          <IssueChatThread
-            comments={issueChatLongThreadComments}
-            linkedRuns={issueChatLongThreadLinkedRuns}
-            timelineEvents={issueChatLongThreadEvents}
-            liveRuns={[]}
-            agentMap={issueChatLongThreadAgentMap}
-            currentUserId="user-board"
-            onAdd={onAdd}
-            showComposer={false}
-            showJumpToLatest
-            enableLiveTranscriptPolling={false}
-            transcriptsByRunId={issueChatLongThreadTranscriptsByRunId}
-            hasOutputForRun={hasOutputForRun}
-          />
-        </MemoryRouter>,
-      );
+      renderIssueThread(root, {
+        comments: issueChatLongThreadComments,
+        linkedRuns: issueChatLongThreadLinkedRuns,
+        timelineEvents: issueChatLongThreadEvents,
+        agentMap: issueChatLongThreadAgentMap,
+        currentUserId: "user-board",
+        onAdd: onAdd,
+        showComposer: false,
+        showJumpToLatest: true,
+        transcriptsByRunId: issueChatLongThreadTranscriptsByRunId,
+        hasOutputForRun: hasOutputForRun,
+      });
     });
 
     expect(markdownBodyRenderMock).not.toHaveBeenCalled();
@@ -1932,59 +1751,43 @@ describe("IssueChatThread", () => {
     ];
 
     act(() => {
-      root.render(
-        <MemoryRouter>
-          <IssueChatThread
-            comments={comments}
-            linkedRuns={[]}
-            timelineEvents={[]}
-            liveRuns={[]}
-            onAdd={onAdd}
-            onVote={onVote}
-            feedbackVotes={[]}
-            showComposer={false}
-            enableLiveTranscriptPolling={false}
-          />
-        </MemoryRouter>,
-      );
+      renderIssueThread(root, {
+        comments: comments,
+        onAdd: onAdd,
+        onVote: onVote,
+        feedbackVotes: [],
+        showComposer: false,
+      });
     });
 
     expect(markdownBodyRenderMock).toHaveBeenCalled();
     markdownBodyRenderMock.mockClear();
 
     act(() => {
-      root.render(
-        <MemoryRouter>
-          <IssueChatThread
-            comments={comments}
-            linkedRuns={[]}
-            timelineEvents={[]}
-            liveRuns={[]}
-            onAdd={onAdd}
-            onVote={onVote}
-            feedbackVotes={[
-              {
-                id: "feedback-1",
-                companyId: "company-1",
-                issueId: "issue-1",
-                targetType: "issue_comment",
-                targetId: "comment-agent-feedback",
-                authorUserId: "user-1",
-                vote: "up",
-                reason: null,
-                sharedWithLabs: false,
-                sharedAt: null,
-                consentVersion: null,
-                redactionSummary: null,
-                createdAt: new Date("2026-04-06T12:01:00.000Z"),
-                updatedAt: new Date("2026-04-06T12:01:00.000Z"),
-              },
-            ]}
-            showComposer={false}
-            enableLiveTranscriptPolling={false}
-          />
-        </MemoryRouter>,
-      );
+      renderIssueThread(root, {
+        comments: comments,
+        onAdd: onAdd,
+        onVote: onVote,
+        feedbackVotes: [
+          {
+            id: "feedback-1",
+            companyId: "company-1",
+            issueId: "issue-1",
+            targetType: "issue_comment",
+            targetId: "comment-agent-feedback",
+            authorUserId: "user-1",
+            vote: "up",
+            reason: null,
+            sharedWithLabs: false,
+            sharedAt: null,
+            consentVersion: null,
+            redactionSummary: null,
+            createdAt: new Date("2026-04-06T12:01:00.000Z"),
+            updatedAt: new Date("2026-04-06T12:01:00.000Z"),
+          },
+        ],
+        showComposer: false,
+      });
     });
 
     expect(markdownBodyRenderMock).not.toHaveBeenCalled();
@@ -1997,34 +1800,25 @@ describe("IssueChatThread", () => {
   it("renders a genuine agent comment in the conference-room neutral bubble (PAP-97 rev 7)", () => {
     const root = createRoot(container);
     act(() => {
-      root.render(
-        <MemoryRouter>
-          <IssueChatThread
-            comments={[
-              {
-                id: "comment-agent-bubble",
-                companyId: "company-1",
-                issueId: "issue-1",
-                authorAgentId: "agent-1",
-                authorUserId: null,
-                body: "Here is my agent reply.",
-                authorType: "agent" as const,
-                presentation: null,
-                metadata: null,
-                createdAt: new Date("2026-04-06T12:00:00.000Z"),
-                updatedAt: new Date("2026-04-06T12:00:00.000Z"),
-              },
-            ]}
-            currentUserId="user-board"
-            linkedRuns={[]}
-            timelineEvents={[]}
-            liveRuns={[]}
-            onAdd={async () => {}}
-            showComposer={false}
-            enableLiveTranscriptPolling={false}
-          />
-        </MemoryRouter>,
-      );
+      renderIssueThread(root, {
+        comments: [
+          {
+            id: "comment-agent-bubble",
+            companyId: "company-1",
+            issueId: "issue-1",
+            authorAgentId: "agent-1",
+            authorUserId: null,
+            body: "Here is my agent reply.",
+            authorType: "agent" as const,
+            presentation: null,
+            metadata: null,
+            createdAt: new Date("2026-04-06T12:00:00.000Z"),
+            updatedAt: new Date("2026-04-06T12:00:00.000Z"),
+          },
+        ],
+        currentUserId: "user-board",
+        showComposer: false,
+      });
     });
 
     // Conference-room canonical agent bubble: bg-card + border + tail corner.
@@ -2051,48 +1845,39 @@ describe("IssueChatThread", () => {
     const onDeleteComment = vi.fn(async () => {});
 
     act(() => {
-      root.render(
-        <MemoryRouter>
-          <IssueChatThread
-            comments={[
-              {
-                id: "comment-owned",
-                companyId: "company-1",
-                issueId: "issue-1",
-                authorAgentId: null,
-                authorUserId: "user-board",
-                body: "Delete me",
-                authorType: "user",
-                presentation: null,
-                metadata: null,
-                createdAt: new Date("2026-04-06T12:00:00.000Z"),
-                updatedAt: new Date("2026-04-06T12:00:00.000Z"),
-              },
-              {
-                id: "comment-other",
-                companyId: "company-1",
-                issueId: "issue-1",
-                authorAgentId: null,
-                authorUserId: "user-other",
-                body: "Do not delete",
-                authorType: "user",
-                presentation: null,
-                metadata: null,
-                createdAt: new Date("2026-04-06T12:01:00.000Z"),
-                updatedAt: new Date("2026-04-06T12:01:00.000Z"),
-              },
-            ]}
-            currentUserId="user-board"
-            linkedRuns={[]}
-            timelineEvents={[]}
-            liveRuns={[]}
-            onAdd={async () => {}}
-            onDeleteComment={onDeleteComment}
-            showComposer={false}
-            enableLiveTranscriptPolling={false}
-          />
-        </MemoryRouter>,
-      );
+      renderIssueThread(root, {
+        comments: [
+          {
+            id: "comment-owned",
+            companyId: "company-1",
+            issueId: "issue-1",
+            authorAgentId: null,
+            authorUserId: "user-board",
+            body: "Delete me",
+            authorType: "user",
+            presentation: null,
+            metadata: null,
+            createdAt: new Date("2026-04-06T12:00:00.000Z"),
+            updatedAt: new Date("2026-04-06T12:00:00.000Z"),
+          },
+          {
+            id: "comment-other",
+            companyId: "company-1",
+            issueId: "issue-1",
+            authorAgentId: null,
+            authorUserId: "user-other",
+            body: "Do not delete",
+            authorType: "user",
+            presentation: null,
+            metadata: null,
+            createdAt: new Date("2026-04-06T12:01:00.000Z"),
+            updatedAt: new Date("2026-04-06T12:01:00.000Z"),
+          },
+        ],
+        currentUserId: "user-board",
+        onDeleteComment: onDeleteComment,
+        showComposer: false,
+      });
     });
 
     const deleteButtons = Array.from(
@@ -2127,38 +1912,29 @@ describe("IssueChatThread", () => {
     const root = createRoot(container);
 
     flushAct(() => {
-      root.render(
-        <MemoryRouter>
-          <IssueChatThread
-            comments={[
-              {
-                id: "comment-deleted",
-                companyId: "company-1",
-                issueId: "issue-1",
-                authorAgentId: null,
-                authorUserId: "user-board",
-                body: "Sensitive deleted body",
-                authorType: "user",
-                presentation: null,
-                metadata: null,
-                deletedAt: new Date("2026-04-06T12:05:00.000Z"),
-                deletedByType: "user",
-                deletedByUserId: "user-board",
-                createdAt: new Date("2026-04-06T12:00:00.000Z"),
-                updatedAt: new Date("2026-04-06T12:05:00.000Z"),
-              },
-            ]}
-            currentUserId="user-board"
-            linkedRuns={[]}
-            timelineEvents={[]}
-            liveRuns={[]}
-            onAdd={async () => {}}
-            onDeleteComment={async () => {}}
-            showComposer={false}
-            enableLiveTranscriptPolling={false}
-          />
-        </MemoryRouter>,
-      );
+      renderIssueThread(root, {
+        comments: [
+          {
+            id: "comment-deleted",
+            companyId: "company-1",
+            issueId: "issue-1",
+            authorAgentId: null,
+            authorUserId: "user-board",
+            body: "Sensitive deleted body",
+            authorType: "user",
+            presentation: null,
+            metadata: null,
+            deletedAt: new Date("2026-04-06T12:05:00.000Z"),
+            deletedByType: "user",
+            deletedByUserId: "user-board",
+            createdAt: new Date("2026-04-06T12:00:00.000Z"),
+            updatedAt: new Date("2026-04-06T12:05:00.000Z"),
+          },
+        ],
+        currentUserId: "user-board",
+        onDeleteComment: async () => {},
+        showComposer: false,
+      });
     });
 
     expect(container.textContent).toContain("You deleted this comment");
@@ -2229,43 +2005,35 @@ describe("IssueChatThread", () => {
     const root = createRoot(container);
 
     act(() => {
-      root.render(
-        <MemoryRouter>
-          <IssueChatThread
-            comments={[
-              {
-                id: "comment-1",
-                companyId: "company-1",
-                issueId: "issue-1",
-                authorAgentId: null,
-                authorUserId: "local-board",
-                body: "Please continue validation.",
-                authorType: "user",
-                presentation: null,
-                metadata: null,
-                followUpRequested: true,
-                createdAt: new Date("2026-03-11T10:00:00.000Z"),
-                updatedAt: new Date("2026-03-11T10:00:00.000Z"),
-              },
-            ]}
-            linkedRuns={[]}
-            timelineEvents={[
-              {
-                id: "event-1",
-                actorType: "agent",
-                actorId: "agent-1",
-                createdAt: new Date("2026-03-11T10:00:00.000Z"),
-                commentId: "comment-1",
-                followUpRequested: true,
-              },
-            ]}
-            liveRuns={[]}
-            onAdd={async () => {}}
-            showComposer={false}
-            enableLiveTranscriptPolling={false}
-          />
-        </MemoryRouter>,
-      );
+      renderIssueThread(root, {
+        comments: [
+          {
+            id: "comment-1",
+            companyId: "company-1",
+            issueId: "issue-1",
+            authorAgentId: null,
+            authorUserId: "local-board",
+            body: "Please continue validation.",
+            authorType: "user",
+            presentation: null,
+            metadata: null,
+            followUpRequested: true,
+            createdAt: new Date("2026-03-11T10:00:00.000Z"),
+            updatedAt: new Date("2026-03-11T10:00:00.000Z"),
+          },
+        ],
+        timelineEvents: [
+          {
+            id: "event-1",
+            actorType: "agent",
+            actorId: "agent-1",
+            createdAt: new Date("2026-03-11T10:00:00.000Z"),
+            commentId: "comment-1",
+            followUpRequested: true,
+          },
+        ],
+        showComposer: false,
+      });
     });
 
     expect(container.textContent).toContain("Follow-up");
@@ -2280,30 +2048,20 @@ describe("IssueChatThread", () => {
     const root = createRoot(container);
 
     act(() => {
-      root.render(
-        <MemoryRouter>
-          <IssueChatThread
-            comments={[]}
-            linkedRuns={[]}
-            timelineEvents={[]}
-            liveRuns={[]}
-            issueStatus="todo"
-            blockedBy={[
-              {
-                id: "blocker-1",
-                identifier: "PAP-1723",
-                title: "QA the install flow",
-                status: "blocked",
-                priority: "medium",
-                assigneeAgentId: "agent-1",
-                assigneeUserId: null,
-              },
-            ]}
-            onAdd={async () => {}}
-            enableLiveTranscriptPolling={false}
-          />
-        </MemoryRouter>,
-      );
+      renderIssueThread(root, {
+        issueStatus: "todo",
+        blockedBy: [
+          {
+            id: "blocker-1",
+            identifier: "PAP-1723",
+            title: "QA the install flow",
+            status: "blocked",
+            priority: "medium",
+            assigneeAgentId: "agent-1",
+            assigneeUserId: null,
+          },
+        ],
+      });
     });
 
     expect(container.textContent).toContain("PAP-1723");
@@ -2321,41 +2079,31 @@ describe("IssueChatThread", () => {
     const root = createRoot(container);
 
     act(() => {
-      root.render(
-        <MemoryRouter>
-          <IssueChatThread
-            comments={[]}
-            linkedRuns={[]}
-            timelineEvents={[]}
-            liveRuns={[]}
-            issueStatus="blocked"
-            blockedBy={[
+      renderIssueThread(root, {
+        issueStatus: "blocked",
+        blockedBy: [
+          {
+            id: "blocker-1",
+            identifier: "PAP-2167",
+            title: "Phase 7 review",
+            status: "blocked",
+            priority: "medium",
+            assigneeAgentId: "agent-1",
+            assigneeUserId: null,
+            terminalBlockers: [
               {
-                id: "blocker-1",
-                identifier: "PAP-2167",
-                title: "Phase 7 review",
-                status: "blocked",
-                priority: "medium",
-                assigneeAgentId: "agent-1",
+                id: "terminal-1",
+                identifier: "PAP-2201",
+                title: "Security sign-off",
+                status: "todo",
+                priority: "high",
+                assigneeAgentId: "agent-2",
                 assigneeUserId: null,
-                terminalBlockers: [
-                  {
-                    id: "terminal-1",
-                    identifier: "PAP-2201",
-                    title: "Security sign-off",
-                    status: "todo",
-                    priority: "high",
-                    assigneeAgentId: "agent-2",
-                    assigneeUserId: null,
-                  },
-                ],
               },
-            ]}
-            onAdd={async () => {}}
-            enableLiveTranscriptPolling={false}
-          />
-        </MemoryRouter>,
-      );
+            ],
+          },
+        ],
+      });
     });
 
     expect(container.textContent).toContain("PAP-2167");
@@ -2376,59 +2124,49 @@ describe("IssueChatThread", () => {
     const root = createRoot(container);
 
     flushAct(() => {
-      root.render(
-        <MemoryRouter>
-          <IssueChatThread
-            comments={[]}
-            linkedRuns={[]}
-            timelineEvents={[]}
-            liveRuns={[]}
-            issueStatus="blocked"
-            liveIssueIds={new Set(["blocker-run"])}
-            blockerAttention={{
-              state: "covered",
-              reason: "active_dependency",
-              unresolvedBlockerCount: 3,
-              coveredBlockerCount: 3,
-              stalledBlockerCount: 0,
-              attentionBlockerCount: 0,
-              sampleBlockerIdentifier: "PAP-2002",
-              sampleStalledBlockerIdentifier: null,
-            }}
-            blockedBy={[
-              {
-                id: "blocker-done",
-                identifier: "PAP-2001",
-                title: "Server work",
-                status: "done",
-                priority: "medium",
-                assigneeAgentId: "agent-1",
-                assigneeUserId: null,
-              },
-              {
-                id: "blocker-run",
-                identifier: "PAP-2002",
-                title: "UI work",
-                status: "in_progress",
-                priority: "medium",
-                assigneeAgentId: "agent-2",
-                assigneeUserId: null,
-              },
-              {
-                id: "blocker-queued",
-                identifier: "PAP-2003",
-                title: "QA gate",
-                status: "todo",
-                priority: "medium",
-                assigneeAgentId: "agent-3",
-                assigneeUserId: null,
-              },
-            ]}
-            onAdd={async () => {}}
-            enableLiveTranscriptPolling={false}
-          />
-        </MemoryRouter>,
-      );
+      renderIssueThread(root, {
+        issueStatus: "blocked",
+        liveIssueIds: new Set(["blocker-run"]),
+        blockerAttention: {
+          state: "covered",
+          reason: "active_dependency",
+          unresolvedBlockerCount: 3,
+          coveredBlockerCount: 3,
+          stalledBlockerCount: 0,
+          attentionBlockerCount: 0,
+          sampleBlockerIdentifier: "PAP-2002",
+          sampleStalledBlockerIdentifier: null,
+        },
+        blockedBy: [
+          {
+            id: "blocker-done",
+            identifier: "PAP-2001",
+            title: "Server work",
+            status: "done",
+            priority: "medium",
+            assigneeAgentId: "agent-1",
+            assigneeUserId: null,
+          },
+          {
+            id: "blocker-run",
+            identifier: "PAP-2002",
+            title: "UI work",
+            status: "in_progress",
+            priority: "medium",
+            assigneeAgentId: "agent-2",
+            assigneeUserId: null,
+          },
+          {
+            id: "blocker-queued",
+            identifier: "PAP-2003",
+            title: "QA gate",
+            status: "todo",
+            priority: "medium",
+            assigneeAgentId: "agent-3",
+            assigneeUserId: null,
+          },
+        ],
+      });
     });
 
     const notice = container.querySelector(
@@ -2469,52 +2207,42 @@ describe("IssueChatThread", () => {
     const root = createRoot(container);
 
     flushAct(() => {
-      root.render(
-        <MemoryRouter>
-          <IssueChatThread
-            comments={[]}
-            linkedRuns={[]}
-            timelineEvents={[]}
-            liveRuns={[]}
-            issueStatus="blocked"
-            liveIssueIds={new Set(["terminal-live"])}
-            blockerAttention={{
-              state: "covered",
-              reason: "active_dependency",
-              unresolvedBlockerCount: 1,
-              coveredBlockerCount: 1,
-              stalledBlockerCount: 0,
-              attentionBlockerCount: 0,
-              sampleBlockerIdentifier: "PAP-3001",
-              sampleStalledBlockerIdentifier: null,
-            }}
-            blockedBy={[
+      renderIssueThread(root, {
+        issueStatus: "blocked",
+        liveIssueIds: new Set(["terminal-live"]),
+        blockerAttention: {
+          state: "covered",
+          reason: "active_dependency",
+          unresolvedBlockerCount: 1,
+          coveredBlockerCount: 1,
+          stalledBlockerCount: 0,
+          attentionBlockerCount: 0,
+          sampleBlockerIdentifier: "PAP-3001",
+          sampleStalledBlockerIdentifier: null,
+        },
+        blockedBy: [
+          {
+            id: "blocker-mid",
+            identifier: "PAP-3001",
+            title: "Phase 7 review",
+            status: "blocked",
+            priority: "medium",
+            assigneeAgentId: "agent-1",
+            assigneeUserId: null,
+            terminalBlockers: [
               {
-                id: "blocker-mid",
-                identifier: "PAP-3001",
-                title: "Phase 7 review",
-                status: "blocked",
-                priority: "medium",
-                assigneeAgentId: "agent-1",
+                id: "terminal-live",
+                identifier: "PAP-3002",
+                title: "Security sign-off",
+                status: "in_progress",
+                priority: "high",
+                assigneeAgentId: "agent-2",
                 assigneeUserId: null,
-                terminalBlockers: [
-                  {
-                    id: "terminal-live",
-                    identifier: "PAP-3002",
-                    title: "Security sign-off",
-                    status: "in_progress",
-                    priority: "high",
-                    assigneeAgentId: "agent-2",
-                    assigneeUserId: null,
-                  },
-                ],
               },
-            ]}
-            onAdd={async () => {}}
-            enableLiveTranscriptPolling={false}
-          />
-        </MemoryRouter>,
-      );
+            ],
+          },
+        ],
+      });
     });
 
     const nowRunning = container.querySelector(
@@ -2534,50 +2262,40 @@ describe("IssueChatThread", () => {
     const root = createRoot(container);
 
     flushAct(() => {
-      root.render(
-        <MemoryRouter>
-          <IssueChatThread
-            comments={[]}
-            linkedRuns={[]}
-            timelineEvents={[]}
-            liveRuns={[]}
-            issueStatus="blocked"
-            liveIssueIds={new Set(["blocker-run"])}
-            blockerAttention={{
-              state: "covered",
-              reason: "active_dependency",
-              unresolvedBlockerCount: 2,
-              coveredBlockerCount: 2,
-              stalledBlockerCount: 0,
-              attentionBlockerCount: 0,
-              sampleBlockerIdentifier: "PAP-4001",
-              sampleStalledBlockerIdentifier: null,
-            }}
-            blockedBy={[
-              {
-                id: "blocker-run",
-                identifier: "PAP-4001",
-                title: "UI work",
-                status: "in_progress",
-                priority: "medium",
-                assigneeAgentId: "agent-1",
-                assigneeUserId: null,
-              },
-              {
-                id: "blocker-parked",
-                identifier: "PAP-4002",
-                title: "Parked backlog task",
-                status: "backlog",
-                priority: "medium",
-                assigneeAgentId: "agent-2",
-                assigneeUserId: null,
-              },
-            ]}
-            onAdd={async () => {}}
-            enableLiveTranscriptPolling={false}
-          />
-        </MemoryRouter>,
-      );
+      renderIssueThread(root, {
+        issueStatus: "blocked",
+        liveIssueIds: new Set(["blocker-run"]),
+        blockerAttention: {
+          state: "covered",
+          reason: "active_dependency",
+          unresolvedBlockerCount: 2,
+          coveredBlockerCount: 2,
+          stalledBlockerCount: 0,
+          attentionBlockerCount: 0,
+          sampleBlockerIdentifier: "PAP-4001",
+          sampleStalledBlockerIdentifier: null,
+        },
+        blockedBy: [
+          {
+            id: "blocker-run",
+            identifier: "PAP-4001",
+            title: "UI work",
+            status: "in_progress",
+            priority: "medium",
+            assigneeAgentId: "agent-1",
+            assigneeUserId: null,
+          },
+          {
+            id: "blocker-parked",
+            identifier: "PAP-4002",
+            title: "Parked backlog task",
+            status: "backlog",
+            priority: "medium",
+            assigneeAgentId: "agent-2",
+            assigneeUserId: null,
+          },
+        ],
+      });
     });
 
     expect(
@@ -2601,42 +2319,32 @@ describe("IssueChatThread", () => {
       const root = createRoot(container);
 
       flushAct(() => {
-        root.render(
-          <MemoryRouter>
-            <IssueChatThread
-              comments={[]}
-              linkedRuns={[]}
-              timelineEvents={[]}
-              liveRuns={[]}
-              issueStatus="blocked"
-              liveIssueIds={new Set(["blocker-1"])}
-              blockerAttention={{
-                state,
-                reason: state === "stalled" ? "stalled_review" : null,
-                unresolvedBlockerCount: 1,
-                coveredBlockerCount: 0,
-                stalledBlockerCount: state === "stalled" ? 1 : 0,
-                attentionBlockerCount: state === "needs_attention" ? 1 : 0,
-                sampleBlockerIdentifier: "PAP-5001",
-                sampleStalledBlockerIdentifier:
-                  state === "stalled" ? "PAP-5001" : null,
-              }}
-              blockedBy={[
-                {
-                  id: "blocker-1",
-                  identifier: "PAP-5001",
-                  title: "Review task",
-                  status: "in_review",
-                  priority: "medium",
-                  assigneeAgentId: "agent-1",
-                  assigneeUserId: null,
-                },
-              ]}
-              onAdd={async () => {}}
-              enableLiveTranscriptPolling={false}
-            />
-          </MemoryRouter>,
-        );
+        renderIssueThread(root, {
+          issueStatus: "blocked",
+          liveIssueIds: new Set(["blocker-1"]),
+          blockerAttention: {
+            state,
+            reason: state === "stalled" ? "stalled_review" : null,
+            unresolvedBlockerCount: 1,
+            coveredBlockerCount: 0,
+            stalledBlockerCount: state === "stalled" ? 1 : 0,
+            attentionBlockerCount: state === "needs_attention" ? 1 : 0,
+            sampleBlockerIdentifier: "PAP-5001",
+            sampleStalledBlockerIdentifier:
+              state === "stalled" ? "PAP-5001" : null,
+          },
+          blockedBy: [
+            {
+              id: "blocker-1",
+              identifier: "PAP-5001",
+              title: "Review task",
+              status: "in_review",
+              priority: "medium",
+              assigneeAgentId: "agent-1",
+              assigneeUserId: null,
+            },
+          ],
+        });
       });
 
       // Blue variant never appears for non-covered states.
@@ -2670,20 +2378,10 @@ describe("IssueChatThread", () => {
     } as Agent;
 
     act(() => {
-      root.render(
-        <MemoryRouter>
-          <IssueChatThread
-            comments={[]}
-            linkedRuns={[]}
-            timelineEvents={[]}
-            liveRuns={[]}
-            agentMap={new Map([["agent-1", pausedAgent]])}
-            currentAssigneeValue="agent:agent-1"
-            onAdd={async () => {}}
-            enableLiveTranscriptPolling={false}
-          />
-        </MemoryRouter>,
-      );
+      renderIssueThread(root, {
+        agentMap: new Map([["agent-1", pausedAgent]]),
+        currentAssigneeValue: "agent:agent-1",
+      });
     });
 
     expect(container.textContent).toContain("CodexCoder is paused");
@@ -2701,22 +2399,12 @@ describe("IssueChatThread", () => {
     const root = createRoot(container);
 
     act(() => {
-      root.render(
-        <MemoryRouter>
-          <IssueChatThread
-            comments={[]}
-            linkedRuns={[]}
-            timelineEvents={[]}
-            liveRuns={[]}
-            onAdd={async () => {}}
-            showComposer={false}
-            showJumpToLatest={false}
-            variant="embedded"
-            emptyMessage="No run output captured."
-            enableLiveTranscriptPolling={false}
-          />
-        </MemoryRouter>,
-      );
+      renderIssueThread(root, {
+        showComposer: false,
+        showJumpToLatest: false,
+        variant: "embedded",
+        emptyMessage: "No run output captured.",
+      });
     });
 
     expect(container.textContent).toContain("No run output captured.");
@@ -2737,21 +2425,11 @@ describe("IssueChatThread", () => {
     const onAcceptInteraction = vi.fn(async () => undefined);
 
     await act(async () => {
-      root.render(
-        <MemoryRouter>
-          <IssueChatThread
-            comments={[]}
-            interactions={[createSuggestedTasksInteraction()]}
-            linkedRuns={[]}
-            timelineEvents={[]}
-            liveRuns={[]}
-            onAdd={async () => {}}
-            onAcceptInteraction={onAcceptInteraction}
-            showComposer={false}
-            enableLiveTranscriptPolling={false}
-          />
-        </MemoryRouter>,
-      );
+      renderIssueThread(root, {
+        interactions: [createSuggestedTasksInteraction()],
+        onAcceptInteraction: onAcceptInteraction,
+        showComposer: false,
+      });
     });
 
     const acceptButton = Array.from(container.querySelectorAll("button")).find(
@@ -2781,38 +2459,28 @@ describe("IssueChatThread", () => {
     const onAcceptInteraction = vi.fn(async () => undefined);
 
     await act(async () => {
-      root.render(
-        <MemoryRouter>
-          <IssueChatThread
-            comments={[]}
-            interactions={[
-              createSuggestedTasksInteraction({
-                payload: {
-                  version: 1,
-                  tasks: [
-                    {
-                      clientKey: "root",
-                      title: "Root task",
-                    },
-                    {
-                      clientKey: "child",
-                      parentClientKey: "root",
-                      title: "Child task",
-                    },
-                  ],
+      renderIssueThread(root, {
+        interactions: [
+          createSuggestedTasksInteraction({
+            payload: {
+              version: 1,
+              tasks: [
+                {
+                  clientKey: "root",
+                  title: "Root task",
                 },
-              }),
-            ]}
-            linkedRuns={[]}
-            timelineEvents={[]}
-            liveRuns={[]}
-            onAdd={async () => {}}
-            onAcceptInteraction={onAcceptInteraction}
-            showComposer={false}
-            enableLiveTranscriptPolling={false}
-          />
-        </MemoryRouter>,
-      );
+                {
+                  clientKey: "child",
+                  parentClientKey: "root",
+                  title: "Child task",
+                },
+              ],
+            },
+          }),
+        ],
+        onAcceptInteraction: onAcceptInteraction,
+        showComposer: false,
+      });
     });
 
     const childCheckbox = container.querySelector(
@@ -2849,21 +2517,11 @@ describe("IssueChatThread", () => {
     const onSubmitInteractionAnswers = vi.fn(async () => undefined);
 
     await act(async () => {
-      root.render(
-        <MemoryRouter>
-          <IssueChatThread
-            comments={[]}
-            interactions={[createQuestionInteraction()]}
-            linkedRuns={[]}
-            timelineEvents={[]}
-            liveRuns={[]}
-            onAdd={async () => {}}
-            onSubmitInteractionAnswers={onSubmitInteractionAnswers}
-            showComposer={false}
-            enableLiveTranscriptPolling={false}
-          />
-        </MemoryRouter>,
-      );
+      renderIssueThread(root, {
+        interactions: [createQuestionInteraction()],
+        onSubmitInteractionAnswers: onSubmitInteractionAnswers,
+        showComposer: false,
+      });
     });
 
     const optionButton = Array.from(container.querySelectorAll("button")).find(
@@ -2900,21 +2558,11 @@ describe("IssueChatThread", () => {
     const onSubmitInteractionAnswers = vi.fn(async () => undefined);
 
     await act(async () => {
-      root.render(
-        <MemoryRouter>
-          <IssueChatThread
-            comments={[]}
-            interactions={[createQuestionInteraction()]}
-            linkedRuns={[]}
-            timelineEvents={[]}
-            liveRuns={[]}
-            onAdd={async () => {}}
-            onSubmitInteractionAnswers={onSubmitInteractionAnswers}
-            showComposer={false}
-            enableLiveTranscriptPolling={false}
-          />
-        </MemoryRouter>,
-      );
+      renderIssueThread(root, {
+        interactions: [createQuestionInteraction()],
+        onSubmitInteractionAnswers: onSubmitInteractionAnswers,
+        showComposer: false,
+      });
     });
 
     const otherButton = Array.from(container.querySelectorAll("button")).find(
@@ -2966,21 +2614,11 @@ describe("IssueChatThread", () => {
     const onCancelInteraction = vi.fn(async () => undefined);
 
     await act(async () => {
-      root.render(
-        <MemoryRouter>
-          <IssueChatThread
-            comments={[]}
-            interactions={[createQuestionInteraction()]}
-            linkedRuns={[]}
-            timelineEvents={[]}
-            liveRuns={[]}
-            onAdd={async () => {}}
-            onCancelInteraction={onCancelInteraction}
-            showComposer={false}
-            enableLiveTranscriptPolling={false}
-          />
-        </MemoryRouter>,
-      );
+      renderIssueThread(root, {
+        interactions: [createQuestionInteraction()],
+        onCancelInteraction: onCancelInteraction,
+        showComposer: false,
+      });
     });
 
     const cancelButton = Array.from(container.querySelectorAll("button")).find(
@@ -3008,22 +2646,12 @@ describe("IssueChatThread", () => {
     const root = createRoot(container);
 
     await act(async () => {
-      root.render(
-        <MemoryRouter>
-          <IssueChatThread
-            comments={[]}
-            interactions={[createExpiredRequestConfirmationInteraction()]}
-            linkedRuns={[]}
-            timelineEvents={[]}
-            liveRuns={[]}
-            onAdd={async () => {}}
-            currentUserId="user-1"
-            userLabelMap={new Map([["user-1", "Dotta"]])}
-            showComposer={false}
-            enableLiveTranscriptPolling={false}
-          />
-        </MemoryRouter>,
-      );
+      renderIssueThread(root, {
+        interactions: [createExpiredRequestConfirmationInteraction()],
+        currentUserId: "user-1",
+        userLabelMap: new Map([["user-1", "Dotta"]]),
+        showComposer: false,
+      });
     });
 
     expect(container.textContent).toContain("Dotta");
@@ -3054,20 +2682,10 @@ describe("IssueChatThread", () => {
     const root = createRoot(container);
 
     await act(async () => {
-      root.render(
-        <MemoryRouter>
-          <IssueChatThread
-            comments={[]}
-            interactions={[expiredSecretProposalInteraction]}
-            linkedRuns={[]}
-            timelineEvents={[]}
-            liveRuns={[]}
-            onAdd={async () => {}}
-            showComposer={false}
-            enableLiveTranscriptPolling={false}
-          />
-        </MemoryRouter>,
-      );
+      renderIssueThread(root, {
+        interactions: [expiredSecretProposalInteraction],
+        showComposer: false,
+      });
     });
 
     expect(container.textContent).toContain("Secret binding requested");
@@ -3086,33 +2704,24 @@ describe("IssueChatThread", () => {
     const root = createRoot(container);
 
     act(() => {
-      root.render(
-        <MemoryRouter>
-          <IssueChatThread
-            comments={[
-              {
-                id: "comment-1",
-                companyId: "company-1",
-                issueId: "issue-1",
-                authorAgentId: "agent-1",
-                authorUserId: null,
-                body: "Agent summary",
-                authorType: "agent",
-                presentation: null,
-                metadata: null,
-                createdAt: new Date("2026-04-06T12:00:00.000Z"),
-                updatedAt: new Date("2026-04-06T12:00:00.000Z"),
-              },
-            ]}
-            linkedRuns={[]}
-            timelineEvents={[]}
-            liveRuns={[]}
-            onAdd={async () => {}}
-            showComposer={false}
-            enableLiveTranscriptPolling={false}
-          />
-        </MemoryRouter>,
-      );
+      renderIssueThread(root, {
+        comments: [
+          {
+            id: "comment-1",
+            companyId: "company-1",
+            issueId: "issue-1",
+            authorAgentId: "agent-1",
+            authorUserId: null,
+            body: "Agent summary",
+            authorType: "agent",
+            presentation: null,
+            metadata: null,
+            createdAt: new Date("2026-04-06T12:00:00.000Z"),
+            updatedAt: new Date("2026-04-06T12:00:00.000Z"),
+          },
+        ],
+        showComposer: false,
+      });
     });
 
     expect(container.textContent).toContain("Agent summary");
@@ -3171,69 +2780,51 @@ describe("IssueChatThread", () => {
     const root = createRoot(container);
 
     act(() => {
-      root.render(
-        <MemoryRouter>
-          <IssueChatThread
-            comments={[
-              {
-                id: "comment-hold",
-                companyId: "company-1",
-                issueId: "issue-1",
-                authorAgentId: null,
-                authorUserId: "user-1",
-                body: "Need a quick update",
-                authorType: "user",
-                presentation: null,
-                metadata: null,
-                queueState: "queued",
-                queueReason: "hold",
-                createdAt: new Date("2026-04-06T12:00:00.000Z"),
-                updatedAt: new Date("2026-04-06T12:00:00.000Z"),
-              },
-            ]}
-            linkedRuns={[]}
-            timelineEvents={[]}
-            liveRuns={[]}
-            onAdd={async () => {}}
-            showComposer={false}
-            enableLiveTranscriptPolling={false}
-          />
-        </MemoryRouter>,
-      );
+      renderIssueThread(root, {
+        comments: [
+          {
+            id: "comment-hold",
+            companyId: "company-1",
+            issueId: "issue-1",
+            authorAgentId: null,
+            authorUserId: "user-1",
+            body: "Need a quick update",
+            authorType: "user",
+            presentation: null,
+            metadata: null,
+            queueState: "queued",
+            queueReason: "hold",
+            createdAt: new Date("2026-04-06T12:00:00.000Z"),
+            updatedAt: new Date("2026-04-06T12:00:00.000Z"),
+          },
+        ],
+        showComposer: false,
+      });
     });
 
     expect(container.textContent).toContain("Deferred wake");
 
     act(() => {
-      root.render(
-        <MemoryRouter>
-          <IssueChatThread
-            comments={[
-              {
-                id: "comment-active-run",
-                companyId: "company-1",
-                issueId: "issue-1",
-                authorAgentId: null,
-                authorUserId: "user-1",
-                body: "Queue behind active run",
-                authorType: "user",
-                presentation: null,
-                metadata: null,
-                queueState: "queued",
-                queueReason: "active_run",
-                createdAt: new Date("2026-04-06T12:01:00.000Z"),
-                updatedAt: new Date("2026-04-06T12:01:00.000Z"),
-              },
-            ]}
-            linkedRuns={[]}
-            timelineEvents={[]}
-            liveRuns={[]}
-            onAdd={async () => {}}
-            showComposer={false}
-            enableLiveTranscriptPolling={false}
-          />
-        </MemoryRouter>,
-      );
+      renderIssueThread(root, {
+        comments: [
+          {
+            id: "comment-active-run",
+            companyId: "company-1",
+            issueId: "issue-1",
+            authorAgentId: null,
+            authorUserId: "user-1",
+            body: "Queue behind active run",
+            authorType: "user",
+            presentation: null,
+            metadata: null,
+            queueState: "queued",
+            queueReason: "active_run",
+            createdAt: new Date("2026-04-06T12:01:00.000Z"),
+            updatedAt: new Date("2026-04-06T12:01:00.000Z"),
+          },
+        ],
+        showComposer: false,
+      });
     });
 
     expect(container.textContent).toContain("Queued");
@@ -3508,19 +3099,9 @@ describe("IssueChatThread", () => {
     const root = createRoot(container);
 
     act(() => {
-      root.render(
-        <MemoryRouter>
-          <IssueChatThread
-            comments={[]}
-            linkedRuns={[]}
-            timelineEvents={[]}
-            liveRuns={[]}
-            onAdd={async () => {}}
-            draftKey="issue-chat-draft:test-1"
-            enableLiveTranscriptPolling={false}
-          />
-        </MemoryRouter>,
-      );
+      renderIssueThread(root, {
+        draftKey: "issue-chat-draft:test-1",
+      });
     });
 
     const editor = container.querySelector(
@@ -3581,18 +3162,7 @@ describe("IssueChatThread", () => {
     const root = createRoot(container);
 
     act(() => {
-      root.render(
-        <MemoryRouter>
-          <IssueChatThread
-            comments={[]}
-            linkedRuns={[]}
-            timelineEvents={[]}
-            liveRuns={[]}
-            onAdd={async () => {}}
-            enableLiveTranscriptPolling={false}
-          />
-        </MemoryRouter>,
-      );
+      renderIssueThread(root);
     });
 
     const dock = container.querySelector(
@@ -3628,20 +3198,10 @@ describe("IssueChatThread", () => {
     const root = createRoot(container);
 
     act(() => {
-      root.render(
-        <MemoryRouter>
-          <IssueChatThread
-            comments={[]}
-            linkedRuns={[]}
-            timelineEvents={[]}
-            liveRuns={[]}
-            onAdd={async () => {}}
-            imageUploadHandler={async () => "/api/attachments/image/content"}
-            onAttachImage={async () => undefined}
-            enableLiveTranscriptPolling={false}
-          />
-        </MemoryRouter>,
-      );
+      renderIssueThread(root, {
+        imageUploadHandler: async () => "/api/attachments/image/content",
+        onAttachImage: async () => undefined,
+      });
     });
 
     const composer = container.querySelector(
@@ -3707,21 +3267,11 @@ describe("IssueChatThread", () => {
     });
 
     await act(async () => {
-      root.render(
-        <MemoryRouter>
-          <IssueChatThread
-            comments={[]}
-            linkedRuns={[]}
-            timelineEvents={[]}
-            liveRuns={[]}
-            onAdd={async () => {}}
-            onAttachImage={onAttachImage}
-            issueWorkMode="standard"
-            onWorkModeChange={() => {}}
-            enableLiveTranscriptPolling={false}
-          />
-        </MemoryRouter>,
-      );
+      renderIssueThread(root, {
+        onAttachImage: onAttachImage,
+        issueWorkMode: "standard",
+        onWorkModeChange: () => {},
+      });
     });
 
     const composer = container.querySelector(
@@ -3858,19 +3408,10 @@ describe("IssueChatThread", () => {
       );
       const root = createRoot(container);
       await act(async () =>
-        root.render(
-          <MemoryRouter>
-            <IssueChatThread
-              comments={[]}
-              linkedRuns={[]}
-              timelineEvents={[]}
-              liveRuns={[]}
-              onAdd={onAdd}
-              draftKey={key}
-              enableLiveTranscriptPolling={false}
-            />
-          </MemoryRouter>,
-        ),
+        renderIssueThread(root, {
+          onAdd: onAdd,
+          draftKey: key,
+        }),
       );
       const editor = container.querySelector<HTMLTextAreaElement>(
         'textarea[aria-label="Issue chat editor"]',
@@ -3976,26 +3517,17 @@ describe("IssueChatThread", () => {
     );
     const root = createRoot(container);
     await act(async () =>
-      root.render(
-        <MemoryRouter>
-          <IssueChatThread
-            comments={[]}
-            linkedRuns={[]}
-            timelineEvents={[]}
-            liveRuns={[]}
-            onAdd={onAdd}
-            draftKey="legacy-awaited-reassignment"
-            enableReassign
-            reassignOptions={[
-              { id: "user:board", label: "Board" },
-              { id: "user:reviewer", label: "Reviewer" },
-            ]}
-            currentAssigneeValue="user:board"
-            suggestedAssigneeValue="user:reviewer"
-            enableLiveTranscriptPolling={false}
-          />
-        </MemoryRouter>,
-      ),
+      renderIssueThread(root, {
+        onAdd: onAdd,
+        draftKey: "legacy-awaited-reassignment",
+        enableReassign: true,
+        reassignOptions: [
+          { id: "user:board", label: "Board" },
+          { id: "user:reviewer", label: "Reviewer" },
+        ],
+        currentAssigneeValue: "user:board",
+        suggestedAssigneeValue: "user:reviewer",
+      }),
     );
     const editor = container.querySelector<HTMLTextAreaElement>(
       'textarea[aria-label="Issue chat editor"]',
@@ -4035,20 +3567,10 @@ describe("IssueChatThread", () => {
     const root = createRoot(container);
 
     act(() => {
-      root.render(
-        <MemoryRouter>
-          <IssueChatThread
-            comments={[]}
-            linkedRuns={[]}
-            timelineEvents={[]}
-            liveRuns={[]}
-            onAdd={async () => {}}
-            imageUploadHandler={async () => "/api/attachments/image/content"}
-            onAttachImage={async () => undefined}
-            enableLiveTranscriptPolling={false}
-          />
-        </MemoryRouter>,
-      );
+      renderIssueThread(root, {
+        imageUploadHandler: async () => "/api/attachments/image/content",
+        onAttachImage: async () => undefined,
+      });
     });
 
     const composer = container.querySelector(
@@ -4109,19 +3631,9 @@ describe("IssueChatThread", () => {
     }));
 
     await act(async () => {
-      root.render(
-        <MemoryRouter>
-          <IssueChatThread
-            comments={[]}
-            linkedRuns={[]}
-            timelineEvents={[]}
-            liveRuns={[]}
-            onAdd={async () => {}}
-            onAttachImage={onAttachImage}
-            enableLiveTranscriptPolling={false}
-          />
-        </MemoryRouter>,
-      );
+      renderIssueThread(root, {
+        onAttachImage: onAttachImage,
+      });
     });
 
     const editor = container.querySelector(
@@ -4153,32 +3665,23 @@ describe("IssueChatThread", () => {
     const root = createRoot(container);
 
     act(() => {
-      root.render(
-        <MemoryRouter>
-          <IssueChatThread
-            comments={[
-              {
-                id: "comment-spacer-1",
-                companyId: "company-1",
-                issueId: "issue-1",
-                authorAgentId: null,
-                authorUserId: "user-1",
-                body: "hello",
-                authorType: "user",
-                presentation: null,
-                metadata: null,
-                createdAt: new Date("2026-04-22T12:00:00.000Z"),
-                updatedAt: new Date("2026-04-22T12:00:00.000Z"),
-              },
-            ]}
-            linkedRuns={[]}
-            timelineEvents={[]}
-            liveRuns={[]}
-            onAdd={async () => {}}
-            enableLiveTranscriptPolling={false}
-          />
-        </MemoryRouter>,
-      );
+      renderIssueThread(root, {
+        comments: [
+          {
+            id: "comment-spacer-1",
+            companyId: "company-1",
+            issueId: "issue-1",
+            authorAgentId: null,
+            authorUserId: "user-1",
+            body: "hello",
+            authorType: "user",
+            presentation: null,
+            metadata: null,
+            createdAt: new Date("2026-04-22T12:00:00.000Z"),
+            updatedAt: new Date("2026-04-22T12:00:00.000Z"),
+          },
+        ],
+      });
     });
 
     const spacer = container.querySelector(
@@ -4196,19 +3699,9 @@ describe("IssueChatThread", () => {
     const root = createRoot(container);
 
     act(() => {
-      root.render(
-        <MemoryRouter>
-          <IssueChatThread
-            comments={[]}
-            linkedRuns={[]}
-            timelineEvents={[]}
-            liveRuns={[]}
-            onAdd={async () => {}}
-            showComposer={false}
-            enableLiveTranscriptPolling={false}
-          />
-        </MemoryRouter>,
-      );
+      renderIssueThread(root, {
+        showComposer: false,
+      });
     });
 
     const spacer = container.querySelector(
@@ -4226,20 +3719,11 @@ describe("IssueChatThread", () => {
     const onAdd = vi.fn().mockResolvedValue(undefined);
 
     act(() => {
-      root.render(
-        <MemoryRouter>
-          <IssueChatThread
-            comments={[]}
-            linkedRuns={[]}
-            timelineEvents={[]}
-            liveRuns={[]}
-            issueStatus="done"
-            currentAssigneeValue="agent:agent-1"
-            onAdd={onAdd}
-            enableLiveTranscriptPolling={false}
-          />
-        </MemoryRouter>,
-      );
+      renderIssueThread(root, {
+        issueStatus: "done",
+        currentAssigneeValue: "agent:agent-1",
+        onAdd: onAdd,
+      });
     });
 
     expect(container.textContent).not.toContain("Re-open");
@@ -4278,25 +3762,16 @@ describe("IssueChatThread", () => {
     const onAdd = vi.fn().mockResolvedValue(undefined);
 
     act(() => {
-      root.render(
-        <MemoryRouter>
-          <IssueChatThread
-            comments={[]}
-            linkedRuns={[]}
-            timelineEvents={[]}
-            liveRuns={[]}
-            onAdd={onAdd}
-            enableReassign
-            reassignOptions={[
-              { id: "", label: "No responsible" },
-              { id: "agent:agent-1", label: "Agent 1" },
-            ]}
-            currentAssigneeValue=""
-            suggestedAssigneeValue=""
-            enableLiveTranscriptPolling={false}
-          />
-        </MemoryRouter>,
-      );
+      renderIssueThread(root, {
+        onAdd: onAdd,
+        enableReassign: true,
+        reassignOptions: [
+          { id: "", label: "No responsible" },
+          { id: "agent:agent-1", label: "Agent 1" },
+        ],
+        currentAssigneeValue: "",
+        suggestedAssigneeValue: "",
+      });
     });
 
     const editor = container.querySelector(
@@ -4354,25 +3829,16 @@ describe("IssueChatThread", () => {
     const onAdd = vi.fn().mockResolvedValue(undefined);
 
     act(() => {
-      root.render(
-        <MemoryRouter>
-          <IssueChatThread
-            comments={[]}
-            linkedRuns={[]}
-            timelineEvents={[]}
-            liveRuns={[]}
-            onAdd={onAdd}
-            enableReassign
-            reassignOptions={[
-              { id: "", label: "No responsible" },
-              { id: "agent:agent-1", label: "Agent 1" },
-            ]}
-            currentAssigneeValue=""
-            suggestedAssigneeValue=""
-            enableLiveTranscriptPolling={false}
-          />
-        </MemoryRouter>,
-      );
+      renderIssueThread(root, {
+        onAdd: onAdd,
+        enableReassign: true,
+        reassignOptions: [
+          { id: "", label: "No responsible" },
+          { id: "agent:agent-1", label: "Agent 1" },
+        ],
+        currentAssigneeValue: "",
+        suggestedAssigneeValue: "",
+      });
     });
 
     const editor = container.querySelector(
@@ -4428,25 +3894,16 @@ describe("IssueChatThread", () => {
     const onAdd = vi.fn().mockResolvedValue(undefined);
 
     act(() => {
-      root.render(
-        <MemoryRouter>
-          <IssueChatThread
-            comments={[]}
-            linkedRuns={[]}
-            timelineEvents={[]}
-            liveRuns={[]}
-            onAdd={onAdd}
-            enableReassign
-            reassignOptions={[
-              { id: "", label: "No responsible" },
-              { id: "agent:agent-1", label: "Agent 1" },
-            ]}
-            currentAssigneeValue="agent:agent-1"
-            suggestedAssigneeValue="agent:agent-1"
-            enableLiveTranscriptPolling={false}
-          />
-        </MemoryRouter>,
-      );
+      renderIssueThread(root, {
+        onAdd: onAdd,
+        enableReassign: true,
+        reassignOptions: [
+          { id: "", label: "No responsible" },
+          { id: "agent:agent-1", label: "Agent 1" },
+        ],
+        currentAssigneeValue: "agent:agent-1",
+        suggestedAssigneeValue: "agent:agent-1",
+      });
     });
 
     const editor = container.querySelector(
@@ -4494,19 +3951,9 @@ describe("IssueChatThread", () => {
       });
 
     act(() => {
-      root.render(
-        <MemoryRouter>
-          <IssueChatThread
-            comments={[]}
-            linkedRuns={[]}
-            timelineEvents={[]}
-            liveRuns={[]}
-            onAdd={async () => {}}
-            composerRef={composerRef}
-            enableLiveTranscriptPolling={false}
-          />
-        </MemoryRouter>,
-      );
+      renderIssueThread(root, {
+        composerRef: composerRef,
+      });
     });
 
     const composer = container.querySelector(
@@ -4553,19 +4000,9 @@ describe("IssueChatThread", () => {
       });
 
     act(() => {
-      root.render(
-        <MemoryRouter>
-          <IssueChatThread
-            comments={[]}
-            linkedRuns={[]}
-            timelineEvents={[]}
-            liveRuns={[]}
-            onAdd={async () => {}}
-            composerRef={composerRef}
-            enableLiveTranscriptPolling={false}
-          />
-        </MemoryRouter>,
-      );
+      renderIssueThread(root, {
+        composerRef: composerRef,
+      });
     });
 
     const editor = container.querySelector(
@@ -4592,47 +4029,27 @@ describe("IssueChatThread", () => {
     const root = createRoot(container);
 
     act(() => {
-      root.render(
-        <MemoryRouter>
-          <IssueChatThread
-            comments={[]}
-            linkedRuns={[]}
-            timelineEvents={[]}
-            liveRuns={[]}
-            onAdd={async () => {}}
-            enableLiveTranscriptPolling={false}
-          />
-        </MemoryRouter>,
-      );
+      renderIssueThread(root);
     });
 
     act(() => {
-      root.render(
-        <MemoryRouter>
-          <IssueChatThread
-            comments={[]}
-            linkedRuns={[]}
-            timelineEvents={[]}
-            liveRuns={[
-              {
-                id: "run-1",
-                issueId: "issue-1",
-                status: "running",
-                invocationSource: "comment",
-                triggerDetail: null,
-                startedAt: "2026-04-06T12:00:00.000Z",
-                finishedAt: null,
-                createdAt: "2026-04-06T12:00:00.000Z",
-                agentId: "agent-1",
-                agentName: "Agent 1",
-                adapterType: "codex_local",
-              },
-            ]}
-            onAdd={async () => {}}
-            enableLiveTranscriptPolling={false}
-          />
-        </MemoryRouter>,
-      );
+      renderIssueThread(root, {
+        liveRuns: [
+          {
+            id: "run-1",
+            issueId: "issue-1",
+            status: "running",
+            invocationSource: "comment",
+            triggerDetail: null,
+            startedAt: "2026-04-06T12:00:00.000Z",
+            finishedAt: null,
+            createdAt: "2026-04-06T12:00:00.000Z",
+            agentId: "agent-1",
+            agentName: "Agent 1",
+            adapterType: "codex_local",
+          },
+        ],
+      });
     });
 
     expect(restoreComposerViewportSnapshotMock).not.toHaveBeenCalled();
@@ -4653,47 +4070,27 @@ describe("IssueChatThread", () => {
     });
 
     act(() => {
-      root.render(
-        <MemoryRouter>
-          <IssueChatThread
-            comments={[]}
-            linkedRuns={[]}
-            timelineEvents={[]}
-            liveRuns={[]}
-            onAdd={async () => {}}
-            enableLiveTranscriptPolling={false}
-          />
-        </MemoryRouter>,
-      );
+      renderIssueThread(root);
     });
 
     act(() => {
-      root.render(
-        <MemoryRouter>
-          <IssueChatThread
-            comments={[]}
-            linkedRuns={[]}
-            timelineEvents={[]}
-            liveRuns={[
-              {
-                id: "run-1",
-                issueId: "issue-1",
-                status: "running",
-                invocationSource: "comment",
-                triggerDetail: null,
-                startedAt: "2026-04-06T12:00:00.000Z",
-                finishedAt: null,
-                createdAt: "2026-04-06T12:00:00.000Z",
-                agentId: "agent-1",
-                agentName: "Agent 1",
-                adapterType: "codex_local",
-              },
-            ]}
-            onAdd={async () => {}}
-            enableLiveTranscriptPolling={false}
-          />
-        </MemoryRouter>,
-      );
+      renderIssueThread(root, {
+        liveRuns: [
+          {
+            id: "run-1",
+            issueId: "issue-1",
+            status: "running",
+            invocationSource: "comment",
+            triggerDetail: null,
+            startedAt: "2026-04-06T12:00:00.000Z",
+            finishedAt: null,
+            createdAt: "2026-04-06T12:00:00.000Z",
+            agentId: "agent-1",
+            agentName: "Agent 1",
+            adapterType: "codex_local",
+          },
+        ],
+      });
     });
 
     expect(restoreComposerViewportSnapshotMock).toHaveBeenCalled();
@@ -4708,56 +4105,45 @@ describe("IssueChatThread", () => {
     const root = createRoot(container);
 
     act(() => {
-      root.render(
-        <MemoryRouter>
-          <IssueChatThread
-            comments={[]}
-            linkedRuns={[]}
-            timelineEvents={[]}
-            liveRuns={[
-              {
-                id: "run-1",
-                issueId: "issue-1",
-                status: "running",
-                invocationSource: "comment",
-                triggerDetail: null,
-                startedAt: "2026-04-06T12:00:00.000Z",
-                finishedAt: null,
-                createdAt: "2026-04-06T12:00:00.000Z",
-                agentId: "agent-1",
-                agentName: "Agent 1",
-                adapterType: "codex_local",
-              },
-            ]}
-            transcriptsByRunId={
-              new Map([
-                [
-                  "run-1",
-                  [
-                    {
-                      kind: "tool_call",
-                      ts: "2026-04-06T12:00:10.000Z",
-                      name: "command_execution",
-                      toolUseId: "tool-1",
-                      input: { command: "pnpm test" },
-                    },
-                    {
-                      kind: "tool_result",
-                      ts: "2026-04-06T12:00:20.000Z",
-                      toolUseId: "tool-1",
-                      toolName: "command_execution",
-                      content: "Tests passed",
-                      isError: false,
-                    },
-                  ],
-                ],
-              ])
-            }
-            onAdd={async () => {}}
-            enableLiveTranscriptPolling={false}
-          />
-        </MemoryRouter>,
-      );
+      renderIssueThread(root, {
+        liveRuns: [
+          {
+            id: "run-1",
+            issueId: "issue-1",
+            status: "running",
+            invocationSource: "comment",
+            triggerDetail: null,
+            startedAt: "2026-04-06T12:00:00.000Z",
+            finishedAt: null,
+            createdAt: "2026-04-06T12:00:00.000Z",
+            agentId: "agent-1",
+            agentName: "Agent 1",
+            adapterType: "codex_local",
+          },
+        ],
+        transcriptsByRunId: new Map([
+            [
+              "run-1",
+              [
+                {
+                  kind: "tool_call",
+                  ts: "2026-04-06T12:00:10.000Z",
+                  name: "command_execution",
+                  toolUseId: "tool-1",
+                  input: { command: "pnpm test" },
+                },
+                {
+                  kind: "tool_result",
+                  ts: "2026-04-06T12:00:20.000Z",
+                  toolUseId: "tool-1",
+                  toolName: "command_execution",
+                  content: "Tests passed",
+                  isError: false,
+                },
+              ],
+            ],
+          ]),
+      });
     });
 
     expect(container.textContent).toContain("Working");
@@ -4772,35 +4158,25 @@ describe("IssueChatThread", () => {
     const root = createRoot(container);
 
     act(() => {
-      root.render(
-        <MemoryRouter>
-          <IssueChatThread
-            comments={[]}
-            linkedRuns={[]}
-            timelineEvents={[]}
-            liveRuns={[]}
-            activeRun={{
-              id: "run-1",
-              issueId: "issue-1",
-              status: "running",
-              invocationSource: "comment",
-              triggerDetail: null,
-              startedAt: "2026-04-06T12:00:00.000Z",
-              finishedAt: null,
-              createdAt: "2026-04-06T12:00:00.000Z",
-              agentId: "agent-1",
-              agentName: "Agent 1",
-              adapterType: "codex_local",
-              currentStatusMessage: "Syncing git worktree to environment",
-              currentStatusUpdatedAt: "2026-04-06T12:00:05.000Z",
-              currentToolName: "bash",
-              lastEventAt: new Date(Date.now() - 2000).toISOString(),
-            }}
-            onAdd={async () => {}}
-            enableLiveTranscriptPolling={false}
-          />
-        </MemoryRouter>,
-      );
+      renderIssueThread(root, {
+        activeRun: {
+          id: "run-1",
+          issueId: "issue-1",
+          status: "running",
+          invocationSource: "comment",
+          triggerDetail: null,
+          startedAt: "2026-04-06T12:00:00.000Z",
+          finishedAt: null,
+          createdAt: "2026-04-06T12:00:00.000Z",
+          agentId: "agent-1",
+          agentName: "Agent 1",
+          adapterType: "codex_local",
+          currentStatusMessage: "Syncing git worktree to environment",
+          currentStatusUpdatedAt: "2026-04-06T12:00:05.000Z",
+          currentToolName: "bash",
+          lastEventAt: new Date(Date.now() - 2000).toISOString(),
+        },
+      });
     });
 
     expect(container.textContent).toContain("Working...");
@@ -4818,21 +4194,12 @@ describe("IssueChatThread", () => {
     const run = issueChatLongThreadLinkedRuns[2];
 
     act(() => {
-      root.render(
-        <MemoryRouter>
-          <IssueChatThread
-            comments={[]}
-            linkedRuns={[run]}
-            timelineEvents={[]}
-            liveRuns={[]}
-            onAdd={async () => {}}
-            showComposer={false}
-            enableLiveTranscriptPolling={false}
-            transcriptsByRunId={issueChatLongThreadTranscriptsByRunId}
-            hasOutputForRun={() => true}
-          />
-        </MemoryRouter>,
-      );
+      renderIssueThread(root, {
+        linkedRuns: [run],
+        showComposer: false,
+        transcriptsByRunId: issueChatLongThreadTranscriptsByRunId,
+        hasOutputForRun: () => true,
+      });
     });
 
     const header = Array.from(container.querySelectorAll("button")).find((button) =>

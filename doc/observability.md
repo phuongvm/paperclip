@@ -595,6 +595,16 @@ still describes the earlier failure. The overall error message is unchanged.
 Elapsed time is bounded to seven days, and the budget to one day. Unknown or
 malformed optional values are omitted without invalidating cleanup ownership.
 
+When the deadline expires while Daytona creation is still pending, the plugin
+makes one read-only lookup (bounded to five seconds, inside the host's 30-second
+RPC margin) of its provisional creation name and reports
+`environmentAcquisitionProviderState`. The value is one of `absent`, `creating`,
+`pending_build`, `building_snapshot`, `pulling_snapshot`, `starting`, `started`,
+`error`, `build_failed`, `other`, or `unavailable` (lookup failed, timed out, or
+ownership labels did not match). It records where the provider left the
+allocation, not why. The lookup does not delete, retry, or change the cleanup
+envelope.
+
 These fields cross the existing creation-cleanup RPC envelope only for lease
 acquisition. The host accepts them only from an actual RPC error with matching
 company, environment, and run ownership. A private receipt binds the report to
@@ -627,6 +637,17 @@ known tool statuses; an incomplete inventory cannot establish that no work is
 pending. Recent events do not prove useful progress. These fields contain only
 numbers and a boolean, never tool names, IDs, arguments, or event content, and
 do not change the execution timeout, cancellation, or recovery policy.
+
+A stopped turn (wall-clock timeout or operator stop) also records
+`acpLastEventAgeAtStopMs` and `acpOldestPendingToolAgeAtStopMs`, measured at the
+moment the stop fired. A cancel can make the agent emit closing events, so the
+finalization age alone cannot separate a turn that went silent long before its
+deadline from one that was still working. For a stopped turn, pending tools
+means the tools pending when the stop fired, so a tool the cancel closes still
+counts; `acpPendingToolCount` keeps its finalization-time meaning. When tools are
+pending, `acpPendingToolKinds` lists their ACP tool kinds as a sorted, comma-separated
+string drawn only from the closed ACP `ToolKind` enum plus `unknown`; the
+server drops the field if any other value appears.
 
 ACP and legacy OpenCode results retain the adapter's resolved wall-clock timeout as
 `adapterExecutionTimeout` in the instance run result. Finalization uses it for

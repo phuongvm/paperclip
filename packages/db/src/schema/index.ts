@@ -185,7 +185,7 @@ export {
 } from "./tool_access.js";
 export {
   companySkills,
-  companySkillVersions,
+  companySkillVersions, companySkillRepositorySnapshots,
   companySkillStars,
   companySkillComments,
   companySkillTestInputs,
@@ -243,6 +243,8 @@ export { chatVoiceReports } from "./chat_voice_reports.js";
 export { chatVoicePhoneLines, chatVoiceInboundCalls } from "./chat_voice_inbound.js";
 export * from "./decision_models.js";
 export { userCompanyPreferences } from "./user_company_preferences.js";
+
+export { chatSlackManagerGrants } from "./chat_slack_manager_grants.js";
 export { aiSubscriptions, aiSubscriptionPrices, aiSubscriptionConnections } from "./ai_subscriptions.js";
 
 export * from "./fast_responses.js";
