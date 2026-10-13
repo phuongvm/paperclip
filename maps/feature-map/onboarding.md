@@ -1,3 +1,7 @@
+---
+navigation: {"section":"Getting started and access","sectionOrder":10,"order":10}
+---
+
 # Onboarding and first work
 
 An operator can start an instance, create a company, configure its first agent, and reach a real first task. Instance setup and company onboarding are separate steps.
@@ -61,3 +65,23 @@ Manual: Run setup in the disposable directory, open the URL it prints, and confi
 - An empty company, an empty instance, and an unauthenticated browser are different states.
 - Creating an agent does not prove its provider login or first execution succeeded.
 - See [access](./access.md) for authenticated deployments and [agents](./agents.md) for later hiring.
+
+### Storybook verification
+
+#### `resume`
+
+Scope: ui
+Storybook: Restored incomplete wizard; invalid or unauthorized saved company; temporarily withheld draft; account switch; storage failure.
+Production: Reload company-prefixed onboarding without duplicating company; restore only authorized account/company draft and retain input after recoverable loading failure.
+Sources: Source: [OnboardingWizard.tsx](../../ui/src/components/OnboardingWizard.tsx), [onboarding-state.ts](../../ui/src/lib/onboarding-state.ts). Tests: [OnboardingWizard.test.tsx](../../ui/src/components/OnboardingWizard.test.tsx), [onboarding-state.test.ts](../../ui/src/lib/onboarding-state.test.ts), [onboarding.spec.ts](../../tests/e2e/onboarding.spec.ts)
+
+#### `instance`
+
+Scope: cli
+Storybook: No authored UI story required for host installation and startup.
+Production: Configure isolated data directory, start instance, confirm printed URL/identity/health, restart with saved configuration.
+Sources: Source: [onboard.ts](../../cli/src/commands/onboard.ts), [onboard-service.ts](../../cli/src/onboard-service.ts). Tests: [onboard.test.ts](../../cli/src/__tests__/onboard.test.ts), [onboard-service.test.ts](../../cli/src/__tests__/onboard-service.test.ts), [test-drive.test.ts](../../cli/src/__tests__/test-drive.test.ts)
+
+### Documentation scope: Login, invitations, and access
+
+Deployment modes and core login/invite/member/token paths are mapped; exhaustive identity-provider, expiry, role, and resource-policy combinations remain.

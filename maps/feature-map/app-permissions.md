@@ -1,4 +1,8 @@
-# App access, action permissions, and testing
+---
+navigation: {"section":"Apps, channels, and extensions","sectionOrder":50,"order":20}
+---
+
+# App access and action permissions
 
 After connecting an app, an operator decides which agents may use it and whether each action is off, requires approval, or is allowed. Activity and action tests help verify the resulting access.
 
@@ -45,3 +49,12 @@ Manual: Run a read-only action with explicit inputs and inspect returned data an
 - Connected does not imply an agent has access or an action is allowed.
 - Credential-only connections may replace tool-action controls with account-specific controls.
 - See [connection setup](./connection-setup.md) for auth and [questions and approvals](./questions-and-approvals.md) for pending action review.
+
+### Storybook verification
+
+#### `catalog-change`
+
+Scope: ui
+Storybook: Mount PermissionsPanel/AppDetail with quarantined actions, selection/review, refresh pending, empty and failed discovery states. Existing auto-allowed NewToolsAllowed examples are not quarantine review.
+Production: Exercise catalog refresh and new-tool review with permitted/denied actors; unreviewed actions stay quarantined, prior Off/Ask choices survive refresh, and approved review persists.
+Sources: Source: [PermissionsPanel.tsx](../../ui/src/pages/apps/app-detail/PermissionsPanel.tsx), [AppDetail.tsx](../../ui/src/pages/apps/AppDetail.tsx), [tool-access.ts](../../server/src/routes/tool-access.ts). Tests: [AppDetail.test.tsx](../../ui/src/pages/apps/AppDetail.test.tsx), [tool-access-service.test.ts](../../server/src/__tests__/tool-access-service.test.ts), [tool-access-policy-service.test.ts](../../server/src/__tests__/tool-access-policy-service.test.ts)

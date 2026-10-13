@@ -2,7 +2,9 @@
 
 Product map: [Hiring, agent configuration, and organization](../feature-map/agents.md).
 
-Review date: 2026-10-12. Source commit: `f981fa3cc10cb8663a87dec60345fbff46d54d0a`.
+Review date: 2026-10-12. Source commit: `58e16dbddfc9c8d0cf60867f9d9847f0feda055b`.
+Native REST transport reconciled in this change; see the
+[shared transport contract](README.md#native-rest-transport).
 
 This is a source-reviewed baseline of representative operations and known gaps.
 Each capability needs operation-level review before its entire scope can be
@@ -97,8 +99,8 @@ API: `present` — representative operation IDs:
 - `POST /api/agents/{id}/resume`.
 - `POST /api/agents/{id}/terminate`.
 
-Agent access: `partial` — REST resume under change grant; pause/terminate require board;
-native call_api blocks all three.
+Agent access: `partial` — REST / native `call_api` resume under agent_config:update
+change-grant authorization; pause and termination remain board-only.
 
 Policy: Agent creation/configuration uses action grants, resource policies and change
 consent; some controls require a board actor.
@@ -111,8 +113,8 @@ credentials/run context; inspect its result and applicable persistence/attributi
 Assert the relevant denied actor, owner, company or mode from Policy. Review the
 remaining operations before qualifying the whole capability.
 
-Gaps: Resume is agent-eligible but lacks a default native binding. Pause and termination
-are actor-boundary decisions.
+Gaps: Resume has a generic native REST path. Pause and termination remain
+enforced actor restrictions.
 
 ## `built-in`
 
@@ -138,3 +140,36 @@ remaining operations before qualifying the whole capability.
 
 Gaps: Provisioning checks agents:create. Enabling/running its built-in routine is not
 the same permission path.
+
+## `primary-agent`
+
+Review: `baseline`.
+
+API: `present` — GET and PUT /api/companies/{companyId}/primary-agent/me.
+
+Agent access: `restricted` — this is the authenticated human's personal
+preference. Agent keys and native call_api use agent identity and are denied by
+the board gate; no dedicated agent selection tool is present.
+
+Policy: Requires board user identity, company access and active membership,
+except implicit-local board or instance administrator. Viewers may choose their
+own primary. Selection requires a same-company readable, available agent and
+is scoped to actor user ID; the request cannot select another user's preference.
+Explicit null selection is rejected; leave/termination can clear an unavailable
+choice. Initialization stays recorded so clearing does not silently replace it.
+
+Evidence: `source-only` — reviewed on 2026-10-13 at
+`60bc0d5fee9a6e48db08fc016521fee3d9f57d67`:
+[routes](../../server/src/routes/primary-agent.ts),
+[service](../../server/src/services/primary-agent.ts),
+[provider](../../ui/src/context/PrimaryAgentProvider.tsx), and
+[route tests](../../server/src/__tests__/primary-agent.test.ts).
+
+Verification: `not-run` — select and read the preference as two company users;
+assert isolation, wrong-company/unreadable targets, pending/terminated agent
+rejection and agent-key denial. Verify replacement confirmation and fallback
+precedence in the UI; inspect the cleared state after permitted leave/termination.
+
+Gaps: No agent mutation path for another person's preference. Live human/agent
+access is unverified; UI fixture callbacks do not establish persistence or task
+and Chat default resolution.

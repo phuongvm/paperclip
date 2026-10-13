@@ -1,3 +1,7 @@
+---
+navigation: {"section":"Tasks and conversations","sectionOrder":20,"order":60}
+---
+
 # Steering and queued messages
 
 People can send follow-ups while an agent works, manage saved messages that have
@@ -135,3 +139,19 @@ gap; do not assume browser queue controls are available in every channel.
 - An interrupted run may need verified cleanup before a saved follow-up can
   start. Preserve and inspect the wait reason; see [recovery](./recovery.md).
 - A healthy idle Agent Chat is waiting for input, not stranded unfinished work.
+
+### Storybook verification
+
+#### `drafts`
+
+Scope: ui
+Storybook: Task-keyed restored draft and attachment receipts; task switch/reload, failed send and uncertain-save recovery.
+Production: Retain correct task draft across navigation and reload; inspect authoritative saved receipt before claiming delivery; do not clear storage on every harness mount.
+Sources: Source: [TaskChatComposer.tsx](../../ui/src/components/task-chat/TaskChatComposer.tsx), [composer-draft.ts](../../ui/src/lib/composer-draft.ts). Tests: [TaskChatComposer.test.tsx](../../ui/src/components/task-chat/TaskChatComposer.test.tsx), [issue-queued-comments-routes.test.ts](../../server/src/__tests__/issue-queued-comments-routes.test.ts)
+
+#### `approval-queue`
+
+Scope: ui
+Storybook: Answered question/accepted approval delivery waiting, eligible steer/interrupt, failed delivery and fresh-session-only approval.
+Production: Keep response delivery durable and distinct from editable comments; coalesce once, enforce fresh-session restrictions and deduplicate concurrent/retried continuation.
+Sources: Source: [TaskChatQueuedMessages.tsx](../../ui/src/components/task-chat/TaskChatQueuedMessages.tsx), [question-response-delivery.ts](../../server/src/services/question-response-delivery.ts). Tests: [TaskChatQueuedMessages.test.tsx](../../ui/src/components/task-chat/TaskChatQueuedMessages.test.tsx), [question-response-delivery.test.ts](../../server/src/__tests__/question-response-delivery.test.ts), [issue-queued-comments-routes.test.ts](../../server/src/__tests__/issue-queued-comments-routes.test.ts)

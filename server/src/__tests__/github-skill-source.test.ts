@@ -6,13 +6,38 @@ import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
 import { describe, expect, it, vi } from 'vitest';
-import { scanGitHubSkills, previewGitHubSkillFile, parseSkillRepository } from '../services/github-skill-source.js';
+import { scanGitHubSkills, scanGitHubSkillsWithPackageFallback, rejectIncompleteSkillPackages, previewGitHubSkillFile, parseSkillRepository } from '../services/github-skill-source.js';
 import { skillSourceDiscoverySchema, skillSourcePreviewSchema, type SkillSourceScanUpdate } from '@paperclipai/shared';
 import { skillFileBytes } from '../services/skill-snapshot.js';
 
 const sha = 'a'.repeat(40);
 const md = (name: string) => `---\nname: ${name}\ndescription: A useful skill\n---\nFollow these instructions.\n`;
 describe('GitHub skill repository discovery', () => {
+  it('keeps bounded packages discoverable but rejects dependencies omitted by repository fallback', async () => {
+    const fixture = githubFixture({
+      'skills/main/SKILL.md': md('main') + '\nRead [shared](../../shared/guide.md) and [helper](../helper/SKILL.md).',
+      'skills/helper/SKILL.md': md('helper'),
+      'shared/guide.md': 'Shared instructions',
+      ...Object.fromEntries(Array.from({ length: 62 }, (_, i) => [`generated/${i}.bin`, 'x'])),
+    });
+    const open = fixture.openSnapshot;
+    fixture.openSnapshot = async (...args) => {
+      const snapshot = await open(...args);
+      for (const entry of snapshot.entries) if (entry.path.startsWith('generated/')) entry.size = 1024 * 1024;
+      return snapshot;
+    };
+    const scan = await scanGitHubSkillsWithPackageFallback({ repositoryUrl: 'https://github.com/acme/skills', packageMode: 'repository' }, fixture);
+    expect(scan.packageMode).toBe('skills');
+    expect(scan.skills.find(skill => skill.name === 'helper')?.error).toBeNull();
+    expect(scan.skills.find(skill => skill.name === 'main')?.error).toContain('dependencies could not be preserved');
+    expect(scan.candidates.find(skill => skill.name === 'main')?.error).toContain('dependencies could not be preserved');
+    const later = await scanGitHubSkills({ repositoryUrl: 'https://github.com/acme/skills', packageMode: 'skills' }, fixture);
+    expect(later.skills.find(skill => skill.name === 'main')?.error).toBeNull();
+    rejectIncompleteSkillPackages(later);
+    expect(later.candidates.find(skill => skill.name === 'main')?.error).toContain('dependencies could not be preserved');
+    expect(later.skills.find(skill => skill.name === 'helper')?.error).toBeNull();
+  });
+
   it('resolves moving branches before cache lookup and reuses the same pinned commit until the branch changes', async () => {
     const fixture = githubFixture({ 'SKILL.md': md('one') });
     const read = vi.fn(fixture) as unknown as typeof fixture;

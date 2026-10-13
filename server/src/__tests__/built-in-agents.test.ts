@@ -295,6 +295,18 @@ describeEmbeddedPostgres("built-in agents", () => {
     expect(rows).toHaveLength(1);
   });
 
+  it("records the human who enabled a built-in agent and leaves automatic creation unattributed", async () => {
+    const enabledCompanyId = await seedCompany({ requireApproval: false });
+    const automaticCompanyId = await seedCompany({ requireApproval: false });
+    const builtIns = builtInAgentService(db);
+
+    const enabled = await builtIns.provision(enabledCompanyId, "briefs", {}, { requestedByUserId: "board-user" });
+    const automatic = await builtIns.provision(automaticCompanyId, "briefs");
+
+    expect(enabled.state.agent?.createdByUserId).toBe("board-user");
+    expect(automatic.state.agent?.createdByUserId).toBeNull();
+  });
+
   it("routes policy-gated built-in provisioning through a pending hire approval", async () => {
     const companyId = await seedCompany();
     const builtIns = builtInAgentService(db);
@@ -336,7 +348,7 @@ describeEmbeddedPostgres("built-in agents", () => {
 
     const rowsBeforeApproval = await db.select().from(agents).where(eq(agents.companyId, companyId));
     expect(rowsBeforeApproval).toHaveLength(1);
-    expect(rowsBeforeApproval[0]).toMatchObject({ status: "pending_approval" });
+    expect(rowsBeforeApproval[0]).toMatchObject({ status: "pending_approval", createdByUserId: "board-user" });
 
     await expect(builtIns.requireBuiltInAgent(companyId, "briefs")).rejects.toMatchObject({
       status: 412,

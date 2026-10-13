@@ -40,22 +40,32 @@ Review: `baseline`.
 API: `present` — representative operation IDs:
 
 - `GET /api/companies/{companyId}/activity`.
+- `GET /api/issues/{id}/activity` (UUID or issue identifier).
 
-Agent access: `available` — REST / native call_api / CLI activity.
+Agent access: `partial` — REST / native call_api / CLI activity for company
+activity. Sandbox agents can use GET issue activity through the default
+[callback bridge](../../packages/adapter-utils/src/sandbox-callback-bridge.ts).
+The bridge still rejects company activity and company audit routes.
 
-Policy: Same company plus visibility/audit/cost/run permissions where the route requires
-them.
+Policy: Company activity requires same-company access and `company_scope:read`,
+with issue visibility filtering. Issue activity requires same-company resource
+access and `issue:read` for the resolved issue. The sandbox transport does not
+replace those controller checks or permit activity writes.
 
-Evidence: `source-only` — [implementation](../../server/src/routes/activity.ts#L224) at
-the reviewed commit above.
+Evidence: `source-only` — [activity routes](../../server/src/routes/activity.ts),
+[agent authorization tests](../../server/src/__tests__/activity-routes.test.ts),
+and [bridge tests](../../packages/adapter-utils/src/sandbox-callback-bridge.test.ts).
+Issue activity transport reviewed at `89770ba707fb1ebd4cabd184eec2e7fee226e0c3`;
+other operations retain the baseline source review above.
 
-Verification: `not-run` — exercise a listed permitted operation with actual agent
-credentials/run context; inspect its result and applicable persistence/attribution.
-Assert the relevant denied actor, owner, company or mode from Policy. Review the
-remaining operations before qualifying the whole capability.
+Verification: `not-run` — no live agent-credential proof. Local route and bridge
+regressions pass: permitted agent issue read, denied company/resource scope,
+denied writes, extra path segments, and company audit routes. With a real
+sandbox agent, read an authorized issue's activity, then verify denial for an
+inaccessible issue, another company, and company-wide audit.
 
-Gaps: Audit export and raw activity creation have extra restrictions; do not equate them
-with activity reading.
+Gaps: Audit export and raw activity creation have extra restrictions; do not
+equate them with issue activity reading. Live sandbox access remains unverified.
 
 ## `runs`
 

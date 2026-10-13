@@ -55,6 +55,24 @@ function config() {
 }
 
 describe("Paperclip Cloud connector", () => {
+  it("accepts a managed test identity and rejects other environments at its broker", () => {
+    const identity = config().config;
+    const env = {
+      PAPERCLIP_CLOUD_CONNECTOR_INSTANCE_ID: identity.instanceId,
+      PAPERCLIP_CLOUD_CONNECTOR_SIGN_PRIVATE_KEY: identity.signPrivateKey,
+      PAPERCLIP_CLOUD_CONNECTOR_SEAL_PRIVATE_KEY: identity.sealPrivateKey,
+      PAPERCLIP_CLOUD_CONNECTOR_BASE_URL: "https://test.paperclip.app",
+      PAPERCLIP_CLOUD_CONNECTOR_ENVIRONMENT: "test",
+    };
+    expect(paperclipCloudConnectorConfigFromEnv(env)).toMatchObject({ environment: "test", baseUrl: env.PAPERCLIP_CLOUD_CONNECTOR_BASE_URL });
+    for (const environment of ["development", "staging", "production"]) {
+      expect(() => paperclipCloudConnectorConfigFromEnv({ ...env, PAPERCLIP_CLOUD_CONNECTOR_ENVIRONMENT: environment })).toThrow(/broker and environment do not match/);
+    }
+    for (const baseUrl of ["https://my.paperclip.app", "https://my-staging.paperclip.app"]) {
+      expect(() => paperclipCloudConnectorConfigFromEnv({ ...env, PAPERCLIP_CLOUD_CONNECTOR_BASE_URL: baseUrl })).toThrow(/broker and environment do not match/);
+    }
+  });
+
   async function rejection(response: Response) {
     const connector = createPaperclipCloudConnector({
       config: config().config,

@@ -206,6 +206,7 @@ const state = vi.hoisted(() => ({
   bundledPackManifestPath: null as string | null,
   bundledRunnerBinary: null as string | null,
   resolveRunnerBinary: vi.fn(() => "/tmp/paperclip-runnerd"),
+  resolveRemoteRunnerBinary: vi.fn(async (input: { configuredPath?: string | null }) => input.configuredPath || "/tmp/paperclip-runnerd"),
   release: null as null | (() => void),
 }));
 
@@ -300,6 +301,7 @@ vi.mock("../issue-recovery-actions.js", () => ({
 
 vi.mock("./native-codex-runner.js", () => ({
   resolvePaperclipRunnerBinary: state.resolveRunnerBinary,
+  resolveRemotePaperclipRunnerBinary: state.resolveRemoteRunnerBinary,
 }));
 
 import {
@@ -373,6 +375,7 @@ beforeEach(() => {
   state.bundledRunnerBinary = null;
   state.createAssignedMcpTools.mockReset();
   state.resolveRunnerBinary.mockReset().mockReturnValue("/tmp/paperclip-runnerd");
+  state.resolveRemoteRunnerBinary.mockReset().mockImplementation(async (input: { configuredPath?: string | null }) => input.configuredPath || "/tmp/paperclip-runnerd");
   state.resolveCurrentWakeCommentsBinding.mockReset().mockResolvedValue(null);
   state.assertCurrentWakeCommentsRead.mockReset().mockResolvedValue(undefined);
 });
@@ -5848,7 +5851,7 @@ describe("native resumed preparation timing", () => {
     const payloadFor = (span: string) =>
       events.find((event) => event.payload?.span === span)?.payload;
     expect(payloadFor("question_response.to_run_created")).toMatchObject({
-      parentSpan: "task.run",
+      parentSpan: "task.provider_session",
       durationMs: 50,
       startOffsetMs: 0,
     });
@@ -5856,7 +5859,7 @@ describe("native resumed preparation timing", () => {
       durationMs: 30,
       startOffsetMs: 70,
     });
-    expect(payloadFor("task.run.measured")).toMatchObject({ durationMs: 100 });
+    expect(payloadFor("task.provider_session.measured")).toMatchObject({ durationMs: 100 });
   });
 
   it("uses attempt-local preparation in the executor without truncating run elapsed time", async () => {
@@ -5910,7 +5913,7 @@ describe("native resumed preparation timing", () => {
       durationMs: 1_000,
       startOffsetMs: 0,
     });
-    expect(payloadFor("task.run.measured")).toMatchObject({
+    expect(payloadFor("task.provider_session.measured")).toMatchObject({
       durationMs: 984_050,
     });
   });
@@ -10485,9 +10488,9 @@ describe("runnerd provider runtime wiring", () => {
       corrupt: true,
       accepted: false,
     },
-  ] as const)(
-    "uses remote prior-run backup when acceptance=$accepted direct=$directLifecycle backup=$backupLifecycle corrupt=$corrupt",
-    async ({ directLifecycle, backupLifecycle, corrupt, accepted }) => {
+  ].flatMap(testCase => (["sandbox", "ssh"] as const).map(transport => ({ ...testCase, transport }))))(
+    "uses $transport prior-run backup when acceptance=$accepted direct=$directLifecycle backup=$backupLifecycle corrupt=$corrupt",
+    async ({ directLifecycle, backupLifecycle, corrupt, accepted, transport }) => {
 
 
       const priorExecution = scopedNativeExecution("remote-prior-scope");
@@ -10501,7 +10504,10 @@ describe("runnerd provider runtime wiring", () => {
       const priorRunDb = priorNativeRunDb(priorExecution);
       const remoteTarget = {
         kind: "remote" as const,
-        transport: "sandbox" as const,
+        transport,
+        spec: { host: "fixture.invalid", username: "fixture", port: 22,
+          remoteCwd: "/workspace", remoteWorkspacePath: "/workspace",
+          privateKey: null, knownHosts: null, strictHostKeyChecking: true },
         providerKey: "daytona",
         leaseId: "environment-lease-remote-prior-scope",
         remoteCwd: "/home/daytona/paperclip-workspace",
@@ -12203,22 +12209,20 @@ describe("runnerd provider runtime wiring", () => {
 
   it.each([
     ...["current", "preinstalled-exact", "preinstalled-mismatch", "preinstalled-error", "preinstalled-timeout", "stale", "missing", "retained", "retained-mismatch", "retained-error", "retained-timeout", "retained-explicit"]
-      .map((image) => ({ image, version: "0.160.0", compatible: true })),
+      .map((image) => ({ image, version: "0.160.0" })),
     ...["0.149.0", "0.149.1", "0.153.4", "0.156.0", "0.160.1"]
-      .map((version) => ({ image: "current", version, compatible: true })),
+      .map((version) => ({ image: "current", version })),
     ...["0.148.9", "0.161.0", "1.0.0", "0.160.0-alpha.1", "unknown"]
-      .map((version) => ({ image: "current", version, compatible: false })),
-  ])("uses shared Codex and the server-owned replacement artifact (image=$image, Codex=$version)", async ({ image, version, compatible }) => {
+      .map((version) => ({ image: "current", version })),
+  ])("uses shared Codex and the server-owned replacement artifact (image=$image, Codex=$version)", async ({ image, version }) => {
     const retained = image.startsWith("retained");
     const exactRetained = image === "retained" || image === "retained-explicit";
     const needsReplacement = image !== "current" && image !== "preinstalled-exact" && !exactRetained;
     // The mocked remote executes metadata probes; artifact staging only needs bytes.
     // Keep this regression independent of a locally compiled Rust runner binary.
     const controllerArtifact = join(isolatedStateDirectory, "paperclip-runnerd");
-    if (needsReplacement || retained || image === "preinstalled-exact") {
-      await writeFile(controllerArtifact, "fixture runner artifact");
-      state.resolveRunnerBinary.mockReturnValueOnce(controllerArtifact);
-    }
+    await writeFile(controllerArtifact, "fixture runner artifact");
+    state.resolveRemoteRunnerBinary.mockResolvedValue(controllerArtifact);
     const onLog = vi.fn(async () => undefined);
     const syncIn = vi.fn(async () => undefined);
     const remoteExecute = vi.fn(
@@ -12300,16 +12304,10 @@ describe("runnerd provider runtime wiring", () => {
       controlPlaneRegistration: (authority: unknown) => Promise<unknown>;
     };
     await expect(transport.controlPlaneRegistration({})).rejects.toThrow(
-      compatible ? "reached-preinstalled-codex-verification" : "runner_remote_provider_artifact_incompatible: supported Codex versions >=0.149.0 <0.161.0",
+      "reached-preinstalled-codex-verification",
     );
-    if (!compatible) {
-      expect(syncIn).not.toHaveBeenCalled();
-      expect(remoteExecute.mock.calls.some(([call]) => call.command === "npm" || call.args?.[1]?.includes("paperclip_codex_launcher_tmp"))).toBe(false);
-      expect(onLog).not.toHaveBeenCalledWith("stderr", expect.stringContaining("using compatible Codex"));
-      return;
-    }
     if (version !== "0.160.0") {
-      expect(onLog).toHaveBeenCalledWith("stderr", expect.stringContaining(`using compatible Codex ${version}`));
+      expect(onLog).toHaveBeenCalledWith("stderr", expect.stringContaining(`using installed Codex ${version === "unknown" || version.includes("alpha") ? "unrecognized version" : version}`));
     }
     if (needsReplacement) {
       expect(transport.runnerBinary).toBe(controllerArtifact);
@@ -12355,12 +12353,7 @@ describe("runnerd provider runtime wiring", () => {
     ].map((scenario) => ({ ...scenario, recover: false })),
     { version: "0.156.0", model: "gpt-6.1-sol", floor: null, recover: true },
     { version: "0.158.0", model: "gpt-6.1-sol", floor: null, recover: true },
-  ])("verifies sandbox Codex $version against the prepared $model selection (floor=$floor, recover=$recover)", async ({ version, model, floor, recover }) => {
-    // A preinstalled Codex inside the compatibility window can still be too
-    // old for the configured model: the ChatGPT backend rejects every turn
-    // with "not supported when using Codex with a ChatGPT account". The
-    // verifier names the stale image instead of letting the run fail as an
-    // account problem.
+  ])("lets sandbox Codex $version reach actual model verification ($model, recover=$recover)", async ({ version, model, recover }) => {
     const preparedModel = recover ? resolvePaperclipRunnerNativeProviderInput({
       backend: "codex_app_server", adapterConfig: { provider: "codex", model }, codexCliVersion: version,
     }).model : model;
@@ -12430,32 +12423,33 @@ describe("runnerd provider runtime wiring", () => {
       );
     }
     await expect(transport.controlPlaneRegistration({})).rejects.toThrow(
-      floor
-        ? `runner_remote_provider_artifact_incompatible: ${model} requires Codex ${floor} or newer with ChatGPT sign-in, received ${version} from the sandbox image; promote a sandbox image with Codex 0.160.0 or configure PAPERCLIP_RUNNER_REMOTE_CODEX_NPM_SPEC=@openai/codex@0.160.0`
-        : "reached-preinstalled-codex-verification",
+      "reached-preinstalled-codex-verification",
     );
-    if (floor) {
-      // No npm spec is configured, so there is no fallback install; the run
-      // fails before launch instead of running against the stale CLI.
-      expect(remoteExecute.mock.calls.some(([call]) => call.command === "npm")).toBe(false);
-      expect(remoteExecute.mock.calls.some(([call]) => call.args?.[1]?.includes("paperclip_codex_launcher_tmp"))).toBe(false);
-    }
+    expect(remoteExecute.mock.calls.some(([call]) => call.command === "npm")).toBe(false);
+
   });
 
-  it("binds a remote launch to the configured controller-owned runner artifact", async () => {
+  it.each(["ssh", "sandbox"].flatMap(transport => ["explicit", "linux-arm64", "linux-x64", "missing", "mismatch"].map(mode => ({ transport, mode }))))
+  ("binds a $transport launch to the selected controller-owned runner artifact ($mode)", async ({ transport, mode }) => {
     const remoteCwd = "/home/daytona/paperclip-workspace";
-    const controllerArtifact = "/controller/artifacts/paperclip-runnerd";
+    const controllerArtifact = `/controller/artifacts/${mode}/paperclip-runnerd`;
+    const explicit = mode === "explicit" || mode === "missing" || mode === "mismatch";
+    const error = mode === "missing" ? "runner_remote_artifact_unavailable" : mode === "mismatch" ? "runner_remote_artifact_platform_mismatch" : null;
+    if (error) state.resolveRemoteRunnerBinary.mockRejectedValue(new Error(error));
+    else state.resolveRemoteRunnerBinary.mockResolvedValue(controllerArtifact);
     const remoteExecution = {
       ...execution,
       binding: { ...execution.binding, runId: "run-remote-runner-artifact" },
       workspace: { ...execution.workspace, cwd: "/host/paperclip-workspace" },
     } as NativeExecutionInputV1;
 
-    await createRunnerdBackend({
+    const backend = createRunnerdBackend({
       db: leaseDb(remoteExecution),
       execution: remoteExecution,
       runnerInstanceId: "runner",
-      runnerExecutionTarget: {
+      runnerExecutionTarget: transport === "sandbox" ? {
+        kind: "remote", transport: "sandbox", providerKey: "test", remoteCwd, runner: { execute: vi.fn() },
+      } : {
         kind: "remote",
         transport: "ssh",
         remoteCwd,
@@ -12470,14 +12464,26 @@ describe("runnerd provider runtime wiring", () => {
           strictHostKeyChecking: true,
         },
       },
-      runnerRemoteBinaryPath: controllerArtifact,
+      ...(explicit ? { runnerRemoteBinaryPath: controllerArtifact } : {}),
     });
+
+    if (error) {
+      await expect(backend).rejects.toThrow(error);
+      expect(state.resolveRemoteRunnerBinary).toHaveBeenCalledWith(expect.objectContaining({ remoteCwd, configuredPath: controllerArtifact }));
+      expect(state.resolveRunnerBinary).not.toHaveBeenCalled();
+      expect(state.createBackend).not.toHaveBeenCalled();
+      expect(state.createTransport).not.toHaveBeenCalled();
+      return;
+    }
+    await backend;
 
     state.createTransport.mockClear();
     state.createBackend.mock.calls.at(-1)![1].codexTransportFactory!();
     expect(state.createTransport).toHaveBeenCalledWith(
       expect.objectContaining({ runnerBinary: controllerArtifact }),
     );
+    expect(state.resolveRemoteRunnerBinary).toHaveBeenCalledWith(expect.objectContaining({ remoteCwd, configuredPath: explicit ? controllerArtifact : undefined }));
+    expect(state.resolveRunnerBinary).not.toHaveBeenCalled();
   });
 
   it.each([

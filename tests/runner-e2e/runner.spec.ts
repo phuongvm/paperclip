@@ -1,3 +1,4 @@
+import { runTaskWorkspacesFlow } from "./task-workspaces-flow.js";
 import type { RestartRunnerIdentity } from "./process-tree-owner.js";
 import { runNativeActiveStopFlow } from "./native-active-stop-flow.js";
 import { runPiControlsFlow } from "./pi-controls-flow.js";
@@ -51,7 +52,7 @@ import { runnerExecutionById } from "./catalog.js";
 import { classifyFailure } from "./failure-classifier.js";
 import { runnerE2EServerControlPaths } from "./harness-env.js";
 import { setupConnectionReview } from "./connection-reviews.js";
-import { setupLiveFixtures, type LiveFixtureValues } from "./live-fixtures.js";
+import { setupLiveFixtures, selectFixtureRuntimeLeases, type LiveFixtureValues } from "./live-fixtures.js";
 import { evaluateMatcher, persistedFinalRunMessage, type MatcherResult } from "./matchers.js";
 import { readRegisteredArtifacts } from "./registered-artifact.js";
 import {
@@ -695,16 +696,9 @@ for (const execution of executions) {
       const listed = await api.get<EnvironmentLeaseRecord[]>(
         `/api/environments/${fixtures.environment.id}/leases`,
       );
-      const selectedRunIds = new Set(selectedRuns.map((run) => run.id));
-      const relevant = listed.filter(
-        (lease) =>
-          lease.provider === "daytona" &&
-          (selectedRunIds.size === 0 ||
-            (lease.heartbeatRunId &&
-              selectedRunIds.has(lease.heartbeatRunId)) ||
-            (issue && lease.issueId === issue.id)),
-      );
-      runtimeLeases = relevant.length > 0 ? relevant : listed;
+      runtimeLeases = selectFixtureRuntimeLeases({ leases: listed,
+        runIds: selectedRuns.map(run => run.id), issueId: issue?.id,
+        setupProbeLeaseId: fixtures.setupProbe?.leaseId });
     };
 
     const cancelActiveRunsForCleanup = async () => {
@@ -967,6 +961,8 @@ for (const execution of executions) {
           companyId: fixtures.company.id,
           environmentId: fixtures.environment.id,
           agentId: fixtures.agent.id,
+          ...(fixtures.setupProbe ? { setupProbe: { durationMs: fixtures.setupProbe.durationMs,
+            ...(fixtures.setupProbe.defaultRunner ? { defaultRunner: fixtures.setupProbe.defaultRunner } : {}) } } : {}),
           secretIds: Object.fromEntries(
             Object.entries(fixtures.secretRefs).map(([name, ref]) => [
               name,
@@ -983,7 +979,17 @@ for (const execution of executions) {
         secrets,
       );
 
-      if (execution.task.flow === "public_mcp") {
+      if (execution.task.flow === "task_workspaces") {
+        const journey = await runTaskWorkspacesFlow({ page, api, fixtures, execution, nonce, temporaryRoot,
+          deadlineAt: startedAtMs + deadlineMs - 30_000,
+          restart: () => restartIsolatedPaperclipServer({ api, requestId: `task-workspaces-${nonce}`, deadlineAt: startedAtMs + deadlineMs }),
+          observe: (currentIssue, currentRuns, checks) => {
+            issue = currentIssue as IssueRecord; selectedRuns = currentRuns as RunRecord[];
+            matcherResults = checks.map(check => ({ matcher: { kind: "json_path" as const, path: `taskWorkspaces.${check.id}`, expected: true }, passed: check.passed, detail: check.detail }));
+          }, capture: captureScreenshot, evidence: (name, data) => writeSanitizedJson(snapshotsDir, name, data, secrets),
+        });
+        issue = journey.issue as IssueRecord; selectedRuns = journey.runs as RunRecord[];
+      } else if (execution.task.flow === "public_mcp") {
         const journey = await runPublicMcpFlow({
           page, api, fixtures, execution, nonce, secrets, userId: publicMcpUserId,
           credential: credentials[execution.profile.credential]!, usage: publicMcpUsage!, deadlineAt: startedAtMs + deadlineMs,

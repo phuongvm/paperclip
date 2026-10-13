@@ -2,7 +2,9 @@
 
 Product map: [Steering and queued messages](../feature-map/steering.md).
 
-Review date: 2026-10-12. Source commit: `f981fa3cc10cb8663a87dec60345fbff46d54d0a`.
+Review date: 2026-10-12. Source commit: `58e16dbddfc9c8d0cf60867f9d9847f0feda055b`.
+Native REST transport reconciled in this change; see the
+[shared transport contract](README.md#native-rest-transport).
 
 This is a source-reviewed baseline of representative operations and known gaps.
 Each capability needs operation-level review before its entire scope can be
@@ -80,8 +82,8 @@ Verification: `not-run` — assert the documented agent denial with an owned tes
 verify any listed agent request/result path separately. A delegated operation needs its
 own policy and access review.
 
-Gaps: Generic native API blocks this execution control; no authority to impersonate the
-steering user.
+Gaps: Steering requires a board user at the HTTP route. Native `call_api`
+preserves this denial and cannot impersonate the steering user.
 
 ## `interrupt`
 

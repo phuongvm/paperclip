@@ -32,7 +32,7 @@ export const GMAIL_CONNECTOR_SCOPES = [
 ] as const;
 export { GOOGLE_WORKSPACE_CONNECTOR_PROFILES };
 
-export type PaperclipCloudConnectorEnvironment = "development" | "staging" | "production";
+export type PaperclipCloudConnectorEnvironment = "development" | "test" | "staging" | "production";
 export type PaperclipCloudConnectorOperation = "status" | "session" | "claim" | "refresh" | "revoke" | "webhook-bind" | "event-lease" | "event-ack" | "github-app";
 export type PaperclipCloudConnectorProfileId = GoogleWorkspaceConnectorProfileId | GitHubConnectorProfileId | AsanaConnectorProfileId | "slack.manager" | "github.bot";
 export type PaperclipCloudConnectorProvider = "google" | "github" | "asana" | "slack";
@@ -232,7 +232,7 @@ export function paperclipCloudConnectorConfigFromEnv(
   if (values.some((value) => !value)) {
     throw new PaperclipCloudConnectorError("Paperclip Cloud connector configuration is incomplete", "CONNECTOR_CONFIG_INCOMPLETE");
   }
-  if (environment !== "development" && environment !== "staging" && environment !== "production") {
+  if (environment !== "development" && environment !== "test" && environment !== "staging" && environment !== "production") {
     throw new PaperclipCloudConnectorError("Paperclip Cloud connector environment is invalid", "CONNECTOR_CONFIG_INVALID");
   }
   const parsedBaseUrl = new URL(baseUrl);
@@ -244,6 +244,7 @@ export function paperclipCloudConnectorConfigFromEnv(
   }
   const brokerHost = parsedBaseUrl.hostname.toLowerCase();
   if ((brokerHost === "my.paperclip.app" && environment !== "production")
+    || (brokerHost === "test.paperclip.app" && environment !== "test")
     || (brokerHost === "my-staging.paperclip.app" && environment !== "staging")) {
     throw new PaperclipCloudConnectorError(
       "Paperclip Cloud connector broker and environment do not match",

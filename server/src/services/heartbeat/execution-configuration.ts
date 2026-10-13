@@ -1,7 +1,10 @@
+import { withSkillActor } from "../skill-access.js";
+import type { AuthorizationActor } from "../authorization.js";
 import { eq, sql } from "drizzle-orm";
 import { heartbeatRuns, type Db, type agents, type projects } from "@paperclipai/db";
-import type { AiConnectionBinding, AiRuntimeConnectionBinding } from "@paperclipai/shared";
-import { readPaperclipSkillSyncPreference } from "@paperclipai/adapter-utils/server-utils";
+import type { AiConnectionBinding } from "@paperclipai/shared";
+import { readPaperclipSkillSyncPreference, resolvePaperclipDesiredSkillNames, resolveLegacyPaperclipDesiredSkillNames,
+  writePaperclipSkillSyncPreference } from "@paperclipai/adapter-utils/server-utils";
 import { parseObject } from "../../adapters/utils.js";
 import { logger } from "../../middleware/logger.js";
 import { AI_CONNECTION_BUSY_RETRY_REASON, extractWakeCommentIds, isNonAssigneeWorkspaceBusyRetry } from "../../modules/run-dispatch/index.js";
@@ -14,7 +17,6 @@ import type { companySkillService } from "../company-skills.js";
 import { connectionIntentService } from "../connection-intents.js";
 import { prepareConnectionInstructionDelivery } from "../connection-instructions.js";
 import { applyConnectorSkills, prepareConnectorSkillDelivery, resolveConnectorAssignments } from "../connector-runtime.js";
-import { buildExecutionWorkspaceAdapterConfig } from "../execution-workspace-policy.js";
 import { resolveManagedGitHubIdentitySelection } from "../git-credentials.js";
 import { resolveAssignedConnectionInstructionsForRun } from "../native-runtime/assigned-mcp-tools.js";
 import { recordFailedSkillPreparation, type NativeRunHistoricalSpan } from "../native-runtime/native-run-trace.js";
@@ -45,17 +47,15 @@ export interface HeartbeatExecutionConfigurationInput {
     responsibleUserId: string | null;
     acceptedPlanContinuationWake: boolean;
     acceptedPlanWakeRoutingDecision: Awaited<ReturnType<typeof resolveAcceptedPlanWakeRoutingDecision>> | null;
-    projectContext: Pick<typeof projects.$inferSelect, "id" | "env"> | null;
+    taskProjectContext: Pick<typeof projects.$inferSelect, "id" | "env"> | null;
     routineEnvContext: Awaited<ReturnType<ReturnType<typeof createHeartbeatRunPreparation>["getRoutineEnvForExecutionIssue"]>>;
   };
   config: {
-    config: Record<string, unknown>;
-    issueAssigneeOverrides: { adapterConfig: Record<string, unknown> | null; useProjectWorkspace: boolean | null } | null;
-    requestedAiBinding: AiRuntimeConnectionBinding | undefined;
+    sourceWorkspaceConfig: Record<string, unknown>;
     aiBinding: AiConnectionBinding | undefined;
   };
   policy: Pick<HeartbeatWorkspacePreparationInput["policy"],
-    "trustPreset" | "projectExecutionWorkspacePolicy" | "issueExecutionWorkspaceSettings" | "requestedExecutionWorkspaceMode" | "useIsolatedTaskDirectory">;
+    "trustPreset" | "useIsolatedTaskDirectory"> & { explicitTaskDirectory: boolean };
   environment: Pick<EnvironmentSelection,
     "selectedEnvironmentId" | "selectedEnvironmentForConfig" | "resolvedInstanceSettings" | "persistedNativeExecutionInput">;
   services: {
@@ -73,27 +73,17 @@ export interface HeartbeatExecutionConfigurationInput {
 /** Assembles effective run configuration; the executor retains cleanup ownership. */
 export async function prepareHeartbeatExecutionConfiguration(db: Db, input: HeartbeatExecutionConfigurationInput) {
   const { run, agent, onFailureSecretsResolved, onManagedAiRuntimeAcquired, onIdentityRedactorPrepared } = input;
-  const { issueId, context, responsibleUserId, acceptedPlanContinuationWake, acceptedPlanWakeRoutingDecision, projectContext, routineEnvContext } = input.task;
-  const { config, issueAssigneeOverrides, requestedAiBinding, aiBinding } = input.config;
-  const { trustPreset, projectExecutionWorkspacePolicy, issueExecutionWorkspaceSettings, requestedExecutionWorkspaceMode, useIsolatedTaskDirectory } = input.policy;
+  const { issueId, context, responsibleUserId, acceptedPlanContinuationWake, acceptedPlanWakeRoutingDecision, taskProjectContext, routineEnvContext } = input.task;
+  const { sourceWorkspaceConfig, aiBinding } = input.config;
+  const { trustPreset, useIsolatedTaskDirectory, explicitTaskDirectory } = input.policy;
   const { selectedEnvironmentId, selectedEnvironmentForConfig, resolvedInstanceSettings, persistedNativeExecutionInput } = input.environment;
   const { secretsSvc, companySkills, appendRunEvent, finalizeAiConnectionBusyDeferral } = input.services;
   let managedAiRuntime: ManagedAiRuntime | undefined;
-  const workspaceManagedConfig = buildExecutionWorkspaceAdapterConfig({
-    agentConfig: config,
-    projectPolicy: projectExecutionWorkspacePolicy,
-    issueSettings: issueExecutionWorkspaceSettings,
-    mode: requestedExecutionWorkspaceMode,
-    legacyUseProjectWorkspace:
-      issueAssigneeOverrides?.useProjectWorkspace ?? null,
-  });
   const mergedConfig = {
-    ...workspaceManagedConfig,
-    ...Object.fromEntries(Object.entries(issueAssigneeOverrides?.adapterConfig ?? {}).filter(([key]) => requestedAiBinding?.mode !== "router" || !["provider", "acpxAgent", "model", "modelReasoningEffort", "reasoningEffort", "effort", "variant"].includes(key))),
-    ...(requestedAiBinding?.mode === "router" ? parseObject(parseObject(context.aiRouterSelection).runtimeConfig) : {}),
+    ...sourceWorkspaceConfig,
     // The base below is already task-owned. Keep directory transport while
     // preserving isolated mode and the mandatory sandbox preflight.
-    ...(useIsolatedTaskDirectory ? { workspaceStrategy: { type: "project_primary" } } : {}),
+    ...((useIsolatedTaskDirectory || explicitTaskDirectory) ? { workspaceStrategy: { type: "project_primary" } } : {}),
   };
   const configSnapshot = buildExecutionWorkspaceConfigSnapshot(
     mergedConfig,
@@ -101,12 +91,15 @@ export async function prepareHeartbeatExecutionConfiguration(db: Db, input: Hear
   );
   const executionRunConfig =
     stripWorkspaceRuntimeFromExecutionRunConfig(mergedConfig);
+  const skillActor: AuthorizationActor = { type: "agent", agentId: agent.id, companyId: agent.companyId,
+    runId: run.id, source: "agent_jwt", onBehalfOfUserId: responsibleUserId === "local-board" ? null : responsibleUserId };
   const runScopedMentionedSkillKeys =
     await resolveRunScopedMentionedSkillKeys({
       db,
       companyId: agent.companyId,
       issueId,
       commentIds: extractWakeCommentIds(context),
+      actor: skillActor,
     });
   const runScopedSkillKeys =
     acceptedPlanContinuationWake &&
@@ -141,11 +134,11 @@ export async function prepareHeartbeatExecutionConfiguration(db: Db, input: Hear
       environmentId: selectedEnvironmentForConfig?.id ?? null,
       environmentEnv: aiBinding ? stripAiAuthBindings(selectedEnvironmentForConfig?.envVars) : selectedEnvironmentForConfig?.envVars ?? null,
       environmentDriver: selectedEnvironmentForConfig?.driver ?? null,
-      projectId: projectContext?.id ?? null,
+      projectId: taskProjectContext?.id ?? null,
       routineId: routineEnvContext.routineId,
       responsibleUserId,
       executionRunConfig: aiBinding ? { ...executionRunConfig, env: stripAiAuthBindings(executionRunConfig.env) } : executionRunConfig,
-      projectEnv: aiBinding ? stripAiAuthBindings(projectContext?.env) : projectContext?.env ?? null,
+      projectEnv: aiBinding ? stripAiAuthBindings(taskProjectContext?.env) : taskProjectContext?.env ?? null,
       routineEnv: aiBinding ? stripAiAuthBindings(routineEnvContext.env) : routineEnvContext.env,
       secretsSvc,
       trustPreset,
@@ -212,18 +205,50 @@ export async function prepareHeartbeatExecutionConfiguration(db: Db, input: Hear
   );
   const nativeRunnerPreparationSpans: NativeRunHistoricalSpan[] = [];
   const skillsPrepareStartedAtMs = Date.now();
+  let skillDeliveryConfig = effectiveResolvedConfig;
   const runtimeSkillEntries = await (async () => {
     try {
-      return await companySkills.listRuntimeSkillEntries(agent.companyId, {
-        versionSelections: skillVersionSelectionMap(
-          runtimeSkillPreference.desiredSkillEntries,
-          {
-            versionPinsEnabled:
-              resolvedInstanceSettings.experimental.enableBetaSkills ===
-              true,
-          },
-        ),
-      });
+      const storedVersions = parseObject(run.contextSnapshot?.skillVersions);
+      const hasStoredVersions = Object.prototype.hasOwnProperty.call(run.contextSnapshot ?? {}, "skillVersions");
+      const versionSelections = hasStoredVersions
+        ? new Map(Object.entries(storedVersions).filter((entry): entry is [string, string | null] => entry[1] === null || typeof entry[1] === "string"))
+        : skillVersionSelectionMap(runtimeSkillPreference.desiredSkillEntries, {
+          versionPinsEnabled: resolvedInstanceSettings.experimental.enableBetaSkills === true,
+        });
+      const entries = await withSkillActor(skillActor, () => companySkills.listRuntimeSkillEntries(agent.companyId, {
+        versionSelections, snapshotLatest: true,
+        ...(hasStoredVersions && run.contextSnapshot?.skillSelectionSnapshot === true
+          ? { onlyKeys: new Set(Object.keys(storedVersions)) }
+          : { selectionConfig: effectiveResolvedConfig, includeLegacy: agent.adapterType !== "paperclip_runner" }),
+      }));
+      const available = hasStoredVersions ? entries.filter(entry => Object.prototype.hasOwnProperty.call(storedVersions, entry.key)) : entries;
+      const availableKeys = new Set(available.map(entry => entry.key));
+      const desiredKeys = hasStoredVersions && run.contextSnapshot?.skillSelectionSnapshot === true
+        ? Object.keys(storedVersions)
+        : agent.adapterType === "paperclip_runner"
+          ? resolvePaperclipDesiredSkillNames(effectiveResolvedConfig, available)
+          : resolveLegacyPaperclipDesiredSkillNames(effectiveResolvedConfig, available);
+      const selectedKeys = new Set(desiredKeys.filter(key => availableKeys.has(key)));
+      const resolved = available.filter(entry => selectedKeys.has(entry.key));
+      // Optional assignments can outlive project membership. Drop inaccessible
+      // assignments from delivery; explicit task mentions remain errors below.
+      skillDeliveryConfig = writePaperclipSkillSyncPreference(effectiveResolvedConfig,
+        resolved.map(entry => ({ key: entry.key, versionId: entry.versionId ?? null })));
+      for (const key of runScopedMentionedSkillKeys) {
+        const entry = resolved.find(candidate => candidate.key === key);
+        if (!entry || entry.sourceStatus === "missing") {
+          throw new ConfigurationIncompleteFailure("A referenced skill is unavailable. Restore its installed version or update the task's skill reference.", {
+            configurationIncomplete: { reason: "skill_unavailable", skillKey: key, actionUrl: "/skills" },
+          });
+        }
+      }
+      if (!hasStoredVersions) {
+        const skillVersions = Object.fromEntries(resolved.map(entry => [entry.key, entry.versionId ?? entry.currentVersionId ?? null]));
+        context.skillVersions = skillVersions;
+        context.skillSelectionSnapshot = true;
+        await db.update(heartbeatRuns).set({ contextSnapshot: sql`coalesce(${heartbeatRuns.contextSnapshot}, '{}'::jsonb) || ${JSON.stringify({ skillVersions, skillSelectionSnapshot: true })}::jsonb` }).where(eq(heartbeatRuns.id, run.id));
+      }
+      return resolved;
     } catch (error) {
       if (agent.adapterType === "paperclip_runner") {
         await recordFailedSkillPreparation({
@@ -244,7 +269,7 @@ export async function prepareHeartbeatExecutionConfiguration(db: Db, input: Hear
     endedAtMs: Date.now(),
   });
   const connectorAssignments = await resolveConnectorAssignments(db, { companyId: agent.companyId, agentId: agent.id, runId: run.id, issueId: typeof context.issueId === "string" ? context.issueId : undefined });
-  const connectorSkillConfig = await applyConnectorSkills(effectiveResolvedConfig, runtimeSkillEntries, connectorAssignments);
+  const connectorSkillConfig = await applyConnectorSkills(skillDeliveryConfig, runtimeSkillEntries, connectorAssignments);
   // Both CLI adapters and native context materialization use the same resolved set.
   runtimeSkillEntries.splice(0, runtimeSkillEntries.length, ...connectorSkillConfig.paperclipRuntimeSkills);
   const connectorDelivery = await prepareConnectorSkillDelivery(connectorSkillConfig, agent.adapterType);

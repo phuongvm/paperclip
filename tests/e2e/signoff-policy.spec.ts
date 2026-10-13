@@ -275,6 +275,7 @@ async function waitForFixtureRun(
   agentId: string,
   issueId: string,
   runId: string,
+  allowCancelledLock = false,
 ) {
   // Negative authorization cases deliberately invoke a non-participant. Leave
   // their API rejection intact instead of waiting for a run they cannot own.
@@ -286,7 +287,8 @@ async function waitForFixtureRun(
     const run = await fetchVerifiedRun(board, runId, agentId, issueId);
     expect(run, "Fixture run must belong to the acting agent and issue").not.toBeNull();
     status = run!.status;
-    if (status === "succeeded") return;
+    if (status === "succeeded") return true;
+    if (status === "cancelled" && allowCancelledLock) return false;
     expect(["queued", "running"], `Fixture run ${runId} ended as ${status}`).toContain(status);
     await new Promise((resolve) => setTimeout(resolve, WAKEUP_POLL_INTERVAL_MS));
   } while (Date.now() < deadline);
@@ -311,7 +313,9 @@ async function retryAgentPatchWithCurrentLockOnConflict(
     const lockedRunId = issueRunLock.checkoutRunId ?? issueRunLock.executionRunId ?? fallbackRunId;
     // A new lock can belong to a newly promoted fixture run, not the completed
     // run we first invoked. Let that exact verified run settle before PATCH.
-    await waitForFixtureRun(board, agent.agentId, issueId, lockedRunId);
+    // Recovery can cancel the selected lock while this wait is in flight.
+    // Read the current lock again; never PATCH under that cancelled run.
+    if (!(await waitForFixtureRun(board, agent.agentId, issueId, lockedRunId, true))) continue;
     res = await agent.request.patch(`${BASE_URL}/api/issues/${issueId}`, {
       headers: { "X-Paperclip-Run-Id": lockedRunId },
       data: patchData,
@@ -368,7 +372,7 @@ async function agentPatch(
     // run-lock race — leave it for the caller to assert on.
     if (issueRunLock.assigneeAgentId !== agent.agentId) break;
     const retryRunId = issueRunLock.checkoutRunId ?? issueRunLock.executionRunId ?? runId;
-    await waitForFixtureRun(board, agent.agentId, issueId, retryRunId);
+    if (!(await waitForFixtureRun(board, agent.agentId, issueId, retryRunId, true))) continue;
     res = await patchWith(retryRunId);
   }
   return res;

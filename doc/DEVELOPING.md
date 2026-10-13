@@ -124,19 +124,30 @@ API responses and MCP transports keep their existing compression behavior.
 
 The board UI Storybook keeps stories and Storybook config under `ui/storybook/` so component review files stay out of the app source routes.
 
-Stories are grouped in `ui/storybook/stories/<feature-area>/` and the sidebar follows
-the feature map's sections and feature names. Shared fixtures live in
-`ui/storybook/support/`. Keep each suite's explicit meta `id` and catalog `stableId`
-when changing titles or locations so existing review links remain valid.
+Stories are grouped in `ui/storybook/stories/<feature-area>/`. Feature recipe
+navigation controls the sidebar. Shared fixtures live in `ui/storybook/support/`.
+Keep each suite's explicit meta `id` when changing titles or locations so existing
+review links remain valid. Author capability associations, implementation/data
+classification and durable limitations in the story's `parameters.paperclip`.
 
-Start from the downstream [Storybook feature index](../maps/storybook-map/INDEX.md)
-to find existing stories by capability. Its [contract](../maps/storybook-map/README.md)
-separates production subjects, prototype implementations, simulated data, and
-source-review status. Use `maintain-storybook` to reconcile stories/fixtures with
-the feature map, and `review-storybook` to exercise them with existing tools.
-Run `node scripts/storybook-catalog.mjs` after affected story or review-source
-changes; review drift before updating fingerprints, then regenerate with `--write`.
-The feature map remains an upstream input and needs no Storybook-specific fields.
+Storybook start/build generates the catalog, feature Overview pages, and literal
+sidebar order from the checked-out sources. `ui/storybook/generated/` and
+`ui/storybook/.storybook/preview.tsx` are ignored build outputs. Shared preview
+fixtures and decorators live in `preview-base.tsx`; generation never edits it.
+UI typechecking also generates the inputs on a fresh checkout.
+
+Run `node scripts/storybook-catalog.mjs` to assemble the local Markdown indexes,
+verification routes and page inventory under `maps/generated/`. Use `--check`
+for validation without writes. These outputs are not committed. Use Git diffs to
+select affected sources for review; do not maintain review fingerprints or append
+a shared review journal. Record executed evidence in the PR, issue, or CI result.
+
+The [Storybook map contract](../maps/storybook-map/README.md) describes annotations
+and the [published guide](https://d1p6rlowie26tp.cloudfront.net/storybook/branches/master/?path=/story/overview-storybook-guide--coverage-guide).
+Use `maintain-storybook` for source alignment and `review-storybook` for rendering
+and interactions. Generated guides, example counts and structural checks do not
+establish production behavior. Feature recipes retain optional verification
+scope guidance; the feature/access structural check needs no Storybook runtime.
 
 **Chat & Comments → Human identity** covers other-human names and avatars on
 left-aligned task messages alongside agents; only the viewer’s own messages are blue/right-aligned. Its review guide explains the data flow; the task journey uses representative
@@ -533,7 +544,7 @@ npx paperclipai allowed-hostname dotta-macbook-pro
 
 The [feature map](../maps/feature-map/README.md) is an optional reference for user
 entry points, targeted tests, manual verification recipes, and coverage gaps.
-Its page inventory is a source snapshot. The documented journeys have separate
+Its generated page inventory lists current source references. The documented journeys have separate
 verification steps and do not run automatically from the map.
 
 The sibling [agent access map](../maps/agent-access-map/README.md) describes API
@@ -1011,6 +1022,13 @@ When an additional repository has a configured local checkout, Paperclip seeds t
 
 Sandbox staging, including Daytona, transfers each repository's Git history and working files. Restore merges files and commits back into each local task checkout independently. Durable sandbox recovery keeps the same repository snapshots. Normal ignore and workspace exclusion rules still apply. A clone failure stops task preparation with an error so the agent does not start with only part of the project.
 
+An interrupted legacy run can retain a file recovery hold after its automatic
+replay decision is resolved. The task's recovery notice remains authoritative.
+After recovering and verifying files from the original workspace, a board member
+with runtime access can record the evidence in that notice. This operation checks
+the exact source run and stop receipts, leaves the task status unchanged, and does
+not start another run. A chat reply cannot clear the file recovery hold.
+
 Staging preserves relative symlink targets in secondary repositories, including skill links such as `.claude/skills/demo -> ../../skills/demo`. It does not rewrite them to host temporary paths or copy their target contents in place of the link. Daytona still rejects outbound archives with absolute or escaping link targets before extraction.
 
 If a repository is detached or its source configuration changes, its previous task copy is retained under `.paperclip-runtime/detached-repositories/` and excluded from future sandbox transfers. Referenced projects continue to use the separate read-only multi-project workspace behavior.
@@ -1354,6 +1372,8 @@ When a workspace service runs Paperclip for browser OAuth QA, configure its `exp
 ## Heartbeat Service Extractions
 
 Keep relevant heartbeat extractions and their focused tests in `server/src/services/heartbeat/`.
+Follow [Heartbeat execution boundaries](../rules/heartbeat-execution-boundaries.mdc)
+for state lifetime, admission, recovery ownership, cleanup ordering, and verification.
 
 Runtime-service coordination is in `server/src/services/heartbeat/runtime-services.ts`.
 It validates service intents, starts configured services, records adapter-managed
@@ -2034,6 +2054,14 @@ pnpm secrets:migrate-inline-env --apply # apply migration
 
 ## Internal Connection Token Brokers
 
+Paperclip Cloud connector identities support `development`, `test`, `staging`,
+and `production`. To enroll a self-hosted instance against the test broker, set
+`PAPERCLIP_CLOUD_CONNECTOR_BASE_URL=https://test.paperclip.app`; its environment
+is inferred as `test`. Managed instances also receive
+`PAPERCLIP_CLOUD_CONNECTOR_ENVIRONMENT=test`. Standard Cloud broker hosts reject
+identities for another environment, and enrollment keys remain local to the
+selected broker.
+
 Connection token exchanges carry a resolved parent credential, so their URLs
 are public-only by default even in local/private deployments. To intentionally
 use an internal broker, configure an exact hostname allowlist:
@@ -2276,6 +2304,14 @@ it needs no running Paperclip instance or provider credentials. The same spec li
 in the default `test:e2e` discovery tree, so the existing Chrome CI shards run it
 on pull requests.
 
+### Workspace feature checks (2026-10-09)
+
+Task files, personal agent state (`AGENT_HOME`), and provider home are distinct. New filesystem tasks without an explicit source use a stable company/task directory. Debug workspace placement through the task workspace API rather than inferring it from organizational project or agent identity.
+
+Focused coverage lives in `task-workspace-binding.test.ts`, `task-workspace-repositories*.test.ts`, `task-workspace-tools.test.ts`, channel integration tests, and adapter-utils checkpoint/native persistence tests. Full handoff still requires the repository typecheck, test, and build commands. Remote transport fixtures establish protocol behavior; they do not qualify production provider throughput.
+
+Channel defaults can be configured in Apps connection settings and per destination. They affect new conversations only. A queued selection or repository request is applied on the next normal admission; configuration changes do not interrupt a live run. See [the architecture](plans/2026-10-09-task-workspaces.md).
+
 ### Slack provisioning paths
 
 Self-hosted development continues to use independent Slack app setup. Managed
@@ -2284,3 +2320,16 @@ companion broker profile and Slack approval. Do not add manager client credentia
 to a local `.env` or an open-source deployment. See
 [Slack setup and Cloud qualification](connections/slack-setup.md) for the gates,
 recovery behavior, and production-component stories.
+
+### Project repository skills
+
+New GitHub project workspace attachments enqueue imports transactionally. A bounded
+server worker drains imports and checks enabled sources every five minutes. Shutdown
+cancels owned scans and releases their leases. Sources can be refreshed manually or
+paused through Skills → Sources. Legacy repositories appear there without being
+imported until the user chooses Import skills.
+
+Storybook: **Skills → Project repository skills**. Its production UI journeys use
+in-memory provider and execution fixtures. Live GitHub refresh and execution need
+separate acceptance evidence. Run the focused browser suite against built Storybook,
+or set `STORYBOOK_TEST_BASE_URL` to an owned Storybook dev server.

@@ -1,9 +1,11 @@
 import { randomUUID } from "node:crypto";
-import { access, readFile } from "node:fs/promises";
+import { access, readFile, mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import path from "node:path";
 import { eq } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
-import { agents, companies, companyMemberships, createDb, heartbeatRunEvents, heartbeatRuns, issues, projects } from "@paperclipai/db";
+import { agents, companies, companyMemberships, companySkills, createDb, heartbeatRunEvents, heartbeatRuns, issues, projects } from "@paperclipai/db";
+import { companySkillService } from "../services/company-skills.js";
 import { registerServerAdapter, unregisterServerAdapter, type AdapterExecutionContext } from "../adapters/index.js";
 import { HttpError } from "../errors.js";
 import { heartbeatService } from "../services/heartbeat.js";
@@ -37,10 +39,14 @@ describePostgres("heartbeat execution configuration through adapter dispatch", (
   const captured = new Map<string, AdapterExecutionContext>();
   const inspect = new Map<string, (input: AdapterExecutionContext) => Promise<void>>();
   const adapterType = "codex_local";
+  const oldHome = process.env.PAPERCLIP_HOME;
+  let home: string;
 
   beforeAll(async () => {
     temporary = await startEmbeddedPostgresTestDatabase("heartbeat-execution-config-");
     db = createDb(temporary.connectionString);
+    home = await mkdtemp(path.join(tmpdir(), "paperclip-execution-skills-"));
+    process.env.PAPERCLIP_HOME = home;
     heartbeat = heartbeatService(db);
     // Exercise real preparation for a managed-capable adapter without calling a provider.
     registerServerAdapter({
@@ -60,6 +66,8 @@ describePostgres("heartbeat execution configuration through adapter dispatch", (
     unregisterServerAdapter(adapterType);
     await db?.$client.end({ timeout: 0 });
     await temporary?.cleanup();
+    if (oldHome === undefined) delete process.env.PAPERCLIP_HOME; else process.env.PAPERCLIP_HOME = oldHome;
+    if (home) await rm(home, { recursive: true, force: true });
   });
 
   async function seed(managed = false) {
@@ -156,5 +164,38 @@ describePostgres("heartbeat execution configuration through adapter dispatch", (
     expect(finished).toMatchObject({ status: "cancelled", errorCode: "ai_connection_busy", resultJson: { executionRecovery: { kind: "ai_connection_wait", providerWorkStarted: false } }, contextSnapshot: { aiConnectionBusyDeferredWhileAssignee: true } });
     const runs = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.agentId, f.agentId));
     expect(runs.filter(run => run.id !== finished.id)).toEqual([expect.objectContaining({ status: "scheduled_retry", scheduledRetryReason: "ai_connection_busy" })]);
+  });
+
+  it("snapshots only selected immutable skills and omits inaccessible optional assignments", async () => {
+    const f = await seed();
+    const skills = companySkillService(db);
+    const selected = await skills.createLocalSkill(f.companyId, { name: "Selected workflow", markdown: "# Selected\nUse the original workflow.\n" });
+    const unused = await skills.createLocalSkill(f.companyId, { name: "Unused workflow" });
+    const restricted = await skills.createLocalSkill(f.companyId, { name: "Restricted workflow" });
+    await db.update(companySkills).set({ accessSourceId: randomUUID() }).where(eq(companySkills.id, restricted.id));
+    await db.update(agents).set({ adapterConfig: { paperclipSkillSync: { desiredSkills: [restricted.key] } } }).where(eq(agents.id, f.agentId));
+    await db.update(issues).set({ description: "Use [/selected](skill://" + selected.id + "?s=selected-workflow)." }).where(eq(issues.id, f.issueId));
+    const { finished, input } = await execute(f);
+    expect(finished.status, finished.error ?? undefined).toBe("succeeded");
+    const inventory = input?.config.paperclipRuntimeSkills as Array<{ key: string; source: string; versionId: string }>;
+    expect(inventory.some(entry => entry.key === unused.key || entry.key === restricted.key)).toBe(false);
+    const delivered = inventory.find(entry => entry.key === selected.key)!;
+    expect(delivered.versionId).toBe(selected.currentVersionId);
+    expect(delivered.source).toContain(selected.currentVersionId!);
+    expect(await readFile(path.join(delivered.source, "SKILL.md"), "utf8")).toContain("Use the original workflow.");
+    expect(finished.contextSnapshot).toMatchObject({ skillSelectionSnapshot: true, skillVersions: { [selected.key]: selected.currentVersionId } });
+    expect(Object.keys(finished.contextSnapshot!.skillVersions as object)).not.toContain(unused.key);
+    expect(Object.keys(finished.contextSnapshot!.skillVersions as object)).not.toContain(restricted.key);
+  });
+
+  it("rejects an inaccessible explicit skill reference before adapter dispatch", async () => {
+    const f = await seed();
+    const skill = await companySkillService(db).createLocalSkill(f.companyId, { name: "Private reference" });
+    await db.update(companySkills).set({ accessSourceId: randomUUID() }).where(eq(companySkills.id, skill.id));
+    await db.update(issues).set({ description: "Use [/private](skill://" + skill.id + "?s=private-reference)." }).where(eq(issues.id, f.issueId));
+    const { finished, input } = await execute(f);
+    expect(finished.status).toBe("failed");
+    expect(finished.error).toContain("referenced skill is unavailable");
+    expect(input).toBeUndefined();
   });
 });

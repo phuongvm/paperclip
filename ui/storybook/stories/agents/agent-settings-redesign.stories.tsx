@@ -12,6 +12,16 @@ const meta = {
           "Design review of the full agent settings. Uses the existing navigation and functional tab components with isolated, mutable Storybook fixtures. No production data is changed.",
       },
     },
+    paperclip: {
+      "capabilities": [
+        "agents/lifecycle",
+        "agents/instructions"
+      ],
+      "status": "mixed",
+      "implementation": "mixed",
+      "boundary": "fixtures",
+      "notes": "Production configuration panels in a locally composed settings shell; full AgentDetail route parity remains unreviewed."
+    },
   },
   argTypes: {
     initialTab: {

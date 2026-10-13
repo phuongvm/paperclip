@@ -1,3 +1,7 @@
+---
+navigation: {"section":"Agents and reusable capabilities","sectionOrder":30,"order":20}
+---
+
 # Runs, harnesses, and model accounts
 
 Operators choose an agent harness and model account, inspect execution history and transcripts, and distinguish a working configuration from a successful task result.
@@ -48,3 +52,12 @@ Manual: Start a disposable task, open its running transcript, and follow it to a
 - The run log is instance database data; it is not the opt-out first-party Telemetry system or operator-configured OpenTelemetry tracing.
 - Authentication/model discovery does not establish tool, image, steering, or resumption capability parity.
 - Use [recovery](./recovery.md) for interrupted runs and [execution environments](./execution-environments.md) for local/SSH/sandbox differences.
+
+Native setup retirement joins owned startup before cleanup can be confirmed.
+[Transport ownership controls](../../packages/paperclip-runner/src/live/runnerd-codex-transport.test.ts)
+hold preparation or registration without launching a provider, then check bounded
+close, rejected duplicate requests, no later launch and retention of unconfirmed
+state. Readiness observes shutdown; resumed startup cannot reactivate ingress
+after close. These are lifecycle controls, separate from installed provider proof.
+The real daemon readiness and recovery controls require their existing native
+fixtures in hosted CI; passing credential-free controls does not qualify them.

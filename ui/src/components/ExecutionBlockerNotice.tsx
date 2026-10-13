@@ -1,5 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import type { ExecutionBlocker } from "@paperclipai/shared";
+import type { ExecutionBlocker, Issue } from "@paperclipai/shared";
+import { WorkspaceFileRecovery } from "./WorkspaceFileRecovery";
 import { agentsApi } from "../api/agents";
 import { activityApi } from "../api/activity";
 import { queryKeys } from "../lib/queryKeys";
@@ -7,10 +8,12 @@ import { Button } from "./ui/button";
 import { cn } from "../lib/utils";
 import { Link } from "../lib/router";
 
-export function ExecutionBlockerNotice({ companyId, issueId, blocker, onRetried, className }: {
+export function ExecutionBlockerNotice({ companyId, issueId, issueStatus, canManage = false, blocker, onRetried, className }: {
   className?: string;
   companyId: string;
   issueId: string;
+  issueStatus?: Issue["status"];
+  canManage?: boolean;
   blocker: ExecutionBlocker;
   onRetried: () => void;
 }) {
@@ -72,6 +75,8 @@ export function ExecutionBlockerNotice({ companyId, issueId, blocker, onRetried,
         <p role="alert" className="w-full text-destructive">{retry.error.message}</p>
       )}
       {runsError && <p role="alert" className="w-full text-destructive">{runsError.message}</p>}
+      {issueStatus && <WorkspaceFileRecovery key={`${blocker.recoveryActionId}:${blocker.runId}`} issueId={issueId}
+        issueStatus={issueStatus} blocker={blocker} canManage={canManage} onRecorded={onRetried} />}
     </div>
   );
 }

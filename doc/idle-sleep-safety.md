@@ -15,7 +15,8 @@ Company members and agents cannot read this report.
    300 seconds. Save the returned `ownerId` and `expiresAt`. An existing drain
    returns 409. An unsupported purpose must leave automatic sleep disabled.
 3. Poll the report with that exact owner. Only
-   `{ "version": 1, "backgroundWork": "none" }` permits sleep. Require the same
+   `{ "version": 1, "backgroundWork": "none" }` permits ordinary idle sleep. The
+   optional routine protocol below requires a durable host alarm as well. Require the same
    `ownerId`, `draining: true`, zero run/wake counters, and enough remaining TTL
    for the provider stop. `present`, `unknown`, missing fields, or errors must
    keep the instance awake. Do not interpret `quiescent` alone as authorization.
@@ -34,6 +35,44 @@ Health and control mutations remain tracked through completion, including
 signed bootstrap writes. Only the task-drain read skips request tracking.
 Its authentication finishes under a separate work token before entering the
 report, so it counts concurrent writes without blocking on its own scan.
+
+## Scheduled routine wake protocol
+
+Verified signed Cloud control callers may opt into
+`GET /api/instance/task-drain?idleSleepSafety=1&scheduledWake=1&ownerId=<owner>`.
+Tenant tokens, browser instance administrators, local implicit actors, and agents
+cannot request this extension. Ordinary reports retain their existing behavior.
+
+If all other background-work checks pass, active routines may return
+`idleSleepSafety: { version: 2, backgroundWork: "none", scheduledWake }`.
+The proof has `version: 1`, `kind: "routines"`, a SHA-256 `generation`, and the
+earliest `nextWakeAt` across every company. Only enabled, unarchived schedule
+triggers with valid cron, timezone and future `next_run_at` qualify. Unsupported
+triggers, setup work, due work, unknown states and more than 10,000 active
+triggers keep the instance awake. Inactive triggers do not create obligations.
+Active routines without enabled triggers have no timed work. Definitions are
+read in the same repeatable-read transaction as the other durable checks.
+
+The host must commit one durable alarm for the exact stack under its live sleep
+lease before stopping compute. It must then re-read the same owned report and
+require the exact generation and deadline. Generation binds the process, hold
+owner and routine/trigger catalog, so restart or schedule edits invalidate it.
+No routine definitions or tenant identifiers appear in the proof. Failure to
+persist or validate the alarm abandons sleep. Cloud acknowledges persistence
+inside its controller; this report alone never authorizes scheduled sleep.
+
+Cloud must start waking early enough for measured startup latency and retry
+failed or missed wakes across controller restart. After wake, the existing
+routine scheduler owns execution, atomic claims and catch-up rules. Local
+scheduling is unchanged for self-hosted instances and whenever Cloud declines
+sleep. This first extension covers routines only. Agent timers, plugin jobs,
+retries, integrations and unsupported queues retain their existing blockers.
+All mutations must enter through the host admission/wake path. Independent
+database writers are outside this single-process protocol.
+
+Verify a full scheduled sleep/wake/execution cycle on staging before enabling
+this host capability. The [tests](../server/src/__tests__/idle-sleep-safety.test.ts)
+cover ownership, future deadlines, changed generations and conservative fallback.
 
 ## Retry history
 

@@ -76,6 +76,8 @@ import {
   upsertIssueFeedbackVoteSchema,
   upsertIssueWatchdogSchema,
   runnerGoalActionRequestSchema,
+  selectTaskWorkspaceSchema,
+  prepareWorkspaceRepositorySchema,
   // Project
   createProjectSchema,
   updateProjectSchema,
@@ -170,6 +172,8 @@ import {
   skillSourcePreviewSchema,
   skillSourceCreateSchema,
   skillSourceSelectionSchema,
+  skillSourceSettingsSchema,
+  projectSkillSourceAdoptSchema,
   companySkillCreateSchema,
   companySkillFileDeleteSchema,
   companySkillFileUpdateSchema,
@@ -238,6 +242,7 @@ import {
   createAcceptedPlanDecompositionSchema,
   resolveIssueRecoveryActionSchema,
   retryWorkspaceExportSchema,
+  resumeWorkspaceFinalizationSchema,
   cancelIssueThreadInteractionSchema,
   // Secret provider configs and remote import
   createSecretProviderConfigSchema,
@@ -908,6 +913,7 @@ const chatPrincipalLinkResponseSchema = z
     externalDetail: z.string(),
     paperclipUserId: z.string().nullable(),
     paperclipUserLabel: z.string().nullable(),
+    paperclipUserImage: z.string().nullable(),
     status: chatIdentityLinkStatusSchema,
   })
   .strict();
@@ -1328,6 +1334,8 @@ const RUNTIME_TOOLS_OPERATIONS = new Set([
 const PUBLIC_OPERATIONS = new Set([
   "GET /api/agent-avatars/{version}/{palette}/{file}",
   "GET /api/health",
+  "GET /api/liveness",
+  "HEAD /api/liveness",
   "GET /api/openapi.json",
   "GET /api/board-claim/{token}",
   "POST /api/cli-auth/challenges",
@@ -1867,6 +1875,28 @@ function applyDocumentFixups(document: any): any {
 }
 
 // ─── Health ──────────────────────────────────────────────────────────────────
+
+registry.registerPath({
+  method: "get",
+  path: "/api/liveness",
+  tags: ["health"],
+  summary: "Process startup status without database access",
+  description: "Runs before actor/session resolution. Reports only in-memory startup recovery and the public build commit. Use /api/health for explicit database readiness or signed bootstrap. No workspace identity or control authority is granted.",
+  responses: {
+    200: r.ok(z.object({ status: z.literal("ok"), commit: z.string().nullable() }).strict()),
+    503: { description: "Startup recovery is not complete", content: {
+      "application/json": { schema: z.object({ status: z.literal("starting"), commit: z.string().nullable() }).strict() },
+    } },
+  },
+});
+
+registry.registerPath({
+  method: "head",
+  path: "/api/liveness",
+  tags: ["health"],
+  summary: "Process startup status without a response body",
+  responses: { 200: { description: "Process startup recovery is complete" }, 503: { description: "Startup recovery is not complete" } },
+});
 
 // Shared by the healthy and database-unreachable responses: full details
 // (including serverInfo) ride only on board/agent-actor responses.
@@ -4320,6 +4350,35 @@ registry.registerPath({
     409: r.conflict,
     422: r.unprocessable,
   },
+});
+
+registry.registerPath({
+  method: "get",
+  path: "/api/issues/{id}/workspace",
+  tags: ["issues"],
+  summary: "Inspect the task workspace and repository preparation state",
+  request: { params: z.object({ id: z.string().uuid() }) },
+  responses: { 200: r.ok(), 401: r.unauthorized, 403: r.forbidden, 404: r.notFound },
+});
+
+registry.registerPath({
+  method: "put",
+  path: "/api/issues/{id}/workspace",
+  tags: ["issues"],
+  summary: "Select a task workspace for the next normal admission",
+  description: "Records workspace intent without restarting active work or changing the task's organizational project. Agents may select only for their bound task.",
+  request: { params: z.object({ id: z.string().uuid() }), body: jsonBody(selectTaskWorkspaceSchema) },
+  responses: { 200: r.ok(), 400: r.badRequest, 401: r.unauthorized, 403: r.forbidden, 404: r.notFound, 409: r.conflict },
+});
+
+registry.registerPath({
+  method: "post",
+  path: "/api/issues/{id}/workspace/repositories",
+  tags: ["issues"],
+  summary: "Request repository preparation in the task workspace",
+  description: "Queues an authorized repository for the next normal admission. The response does not claim the repository is available in an already-running provider session.",
+  request: { params: z.object({ id: z.string().uuid() }), body: jsonBody(prepareWorkspaceRepositorySchema) },
+  responses: { 200: r.ok(), 400: r.badRequest, 401: r.unauthorized, 403: r.forbidden, 404: r.notFound, 409: r.conflict },
 });
 
 registry.registerPath({
@@ -6795,7 +6854,7 @@ registry.registerPath({
   tags: ["instance"],
   summary:
     "Get the task-drain status for this process only; quiescent counts in-process work, and a process restart clears it even when the database still holds running rows",
-  request: { query: z.object({ ownerId: z.string().uuid().optional(), idleSleepSafety: z.literal("1").optional().describe("Instance admins can request a conservative durable-work report while admission and ingress are held. Unknown or present work must prevent automatic sleep.") }) },
+  request: { query: z.object({ ownerId: z.string().uuid().optional(), idleSleepSafety: z.literal("1").optional().describe("Instance admins can request a conservative durable-work report while admission and ingress are held. Unknown or present work must prevent automatic sleep."), scheduledWake: z.literal("1").optional().describe("Cloud control callers may request an owned routine deadline report. Cloud must acknowledge a durable alarm and revalidate this report before stopping the instance.") }) },
   responses: { 200: r.ok(), 401: r.unauthorized, 403: r.forbidden },
 });
 
@@ -10581,6 +10640,15 @@ registerCurrentRoute({
 
 registerCurrentRoute({
   method: "post",
+  path: "/api/issues/{id}/recovery-actions/resume-workspace-finalization",
+  tags: ["issues"],
+  summary: "Resume a saved native result after operator verification of the prior workspace owner's stop",
+  body: resumeWorkspaceFinalizationSchema,
+  responses: { 202: r.ok(), 400: r.badRequest, 401: r.unauthorized, 403: r.forbidden, 404: r.notFound, 409: r.conflict },
+});
+
+registerCurrentRoute({
+  method: "post",
   path: "/api/issues/{id}/recovery-actions/retry-workspace-export",
   tags: ["issues"],
   summary: "Retry only workspace export for a repaired accepted native result",
@@ -12311,6 +12379,9 @@ registerCurrentRoute({
 
 for (const [method, path, summary] of [
   ["get", "/api/companies/{companyId}/skill-sources", "List GitHub skill sources"],
+  ["get", "/api/companies/{companyId}/skill-sources/project-repositories", "List accessible project repositories and skill import status"],
+  ["post", "/api/companies/{companyId}/skill-sources/adopt-project", "Import all skills from an accessible project repository"],
+  ["patch", "/api/companies/{companyId}/skill-sources/{sourceId}/settings", "Set automatic skill updates and authorized refresh connection"],
   ["get", "/api/companies/{companyId}/skill-sources/repositories", "Browse authorized GitHub repositories for skills"],
   ["get", "/api/companies/{companyId}/skill-sources/{sourceId}", "Get a skill source and entries"],
   ["post", "/api/companies/{companyId}/skill-sources/discover", "Discover and validate repository skills"],
@@ -12321,12 +12392,14 @@ for (const [method, path, summary] of [
   ["delete", "/api/companies/{companyId}/skill-sources/{sourceId}", "Disconnect a skill source and retain installed skills"],
 ] as const) registerCurrentRoute({
   method, path, tags: ["skills"], summary,
-  ...(method === "patch" ? { body: skillSourceSelectionSchema }
+  ...(method === "patch" && path.endsWith("/settings") ? { body: skillSourceSettingsSchema }
+    : method === "post" && path.endsWith("/adopt-project") ? { body: projectSkillSourceAdoptSchema }
+    : method === "patch" ? { body: skillSourceSelectionSchema }
     : method === "post" && path.endsWith("/discover") ? { body: skillSourceDiscoverySchema }
     : method === "post" && path.endsWith("/preview") ? { body: skillSourcePreviewSchema }
     : method === "post" && path.endsWith("/skill-sources") ? { body: skillSourceCreateSchema } : {}),
   responses: {
-    [method === "post" && path.endsWith("/skill-sources") ? 201 : 200]: path.endsWith("/discover") ? {
+    [path.endsWith("/adopt-project") ? 202 : method === "post" && path.endsWith("/skill-sources") ? 201 : 200]: path.endsWith("/discover") ? {
       description: "JSON discovery by default. Accept: application/x-ndjson streams progress (phase, measured Git download percentages, and package/file counts), candidate metadata, then complete with discovery. An error event terminates a failed scan; partial candidates cannot be imported. Disconnecting cancels further provider reads.",
       content: { "application/json": { schema: z.unknown() }, "application/x-ndjson": { schema: z.string() } },
     } : r.ok(),
