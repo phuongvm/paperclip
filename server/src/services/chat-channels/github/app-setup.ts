@@ -1,3 +1,4 @@
+import type { ChatEndpointSetupState } from "@paperclipai/shared";
 import type { VerifiedProviderIdentity } from "../runtime-types.js";
 
 import { createSetupProbes } from "../setup-probes.js";
@@ -234,5 +235,11 @@ export function createGitHubAppSetup(db: Db, options: GitHubAppSetupOptions) {
         throw conflict("GitHub Cloud ingress could not be durably accepted");
     },
   );
-  return { storeGitHubApp, githubRegistration, refreshGitHubRepositories, githubWizard, unregisterGitHubCloudIngress };
+  const saveGitHubSetupProgress = async (endpointId: string, stage: NonNullable<ChatEndpointSetupState["github"]>["stage"]) => {
+      const record = await endpointRecord(endpointId);
+      if (!record || record.endpoint.provider !== "github") throw notFound("GitHub bot not found");
+      await db.update(chatEndpoints).set({ setup: sql`jsonb_set(${chatEndpoints.setup}, '{github}', coalesce(${chatEndpoints.setup}->'github', '{}'::jsonb) || ${JSON.stringify({ stage })}::jsonb)`, updatedAt: new Date() }).where(eq(chatEndpoints.id, endpointId));
+      return get(endpointId);
+  };
+  return { storeGitHubApp, githubRegistration, refreshGitHubRepositories, githubWizard, unregisterGitHubCloudIngress, saveGitHubSetupProgress };
 }

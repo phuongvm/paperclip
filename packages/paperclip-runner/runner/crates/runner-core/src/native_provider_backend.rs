@@ -175,10 +175,9 @@ impl NativeProviderCommandExecutor {
                 )
             })?;
         self.selected = Some(match kind {
-            "openai_dot" => SelectedExecutor::Dot(DotCommandExecutor::with_runner_config(
-                &self.state_dir,
-                &self.config,
-            )),
+            "openai_dot" | "grok_bot" => SelectedExecutor::Dot(
+                DotCommandExecutor::with_runner_config(&self.state_dir, &self.config),
+            ),
             "codex" | "opencode" => SelectedExecutor::LocalFacade(
                 CodexCommandExecutor::with_runner_config(&self.state_dir, &self.config),
             ),

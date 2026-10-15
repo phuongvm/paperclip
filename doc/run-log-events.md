@@ -139,6 +139,11 @@ proofs, encryption keys, environment variables, provider credentials, command
 arguments, or an unsanitized stderr stream. Detailed failed-attempt diagnostics
 remain in the bounded `native_run_finalizations.recovery_history` ledger.
 
+For a prepared remote workspace interrupted before its first executor claim,
+that ledger records `remote_execution_never_claimed` with a
+`bootstrap_incomplete` disposition. The provider attempt remains zero during
+classification; the executor increments it before starting provider work.
+
 For a local Codex turn lost while runnerd was stopped, the canonical `turn.failed`
 event retains `error.code: "provider_turn_lost_on_restore"` and
 `error.recoverable: true`. It records the interrupted turn, not a final task
@@ -329,6 +334,14 @@ The local lifecycle event includes this evidence. Started cancellations without
 an expected stop are also reported to Sentry; its cancellation diagnostics contain
 only source, expectedness, initiator type, and the closed lease-loss cause, never
 initiator IDs or reason text.
+A lease loss also records `resultJson.controllerLeaseLoss`, including a loss
+during setup that fails the run before adapter dispatch. It holds the closed
+cause and the watchdog timings in milliseconds: `sinceRenewalMs` (since the
+last successful renewal), `renewalPendingMs` (age of a renewal query still in
+flight, or `null`), `deadlineLateMs` (how late the deadline callback ran, for
+`renewal_deadline` only), and `renewalCount`. A long `renewalPendingMs` points
+at a stalled database query; a long `deadlineLateMs` points at a blocked event
+loop. Failure reports carry these bounded numbers and the cause label only.
 Historical ambiguous cancellations stay `unknown` and do not authorize replay.
 
 Provider tool-definition validation failures use

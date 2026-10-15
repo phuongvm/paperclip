@@ -13,6 +13,7 @@ import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { packConcurrency, packStagedPackages, packTimings } from './pack-staged-packages.mjs';
 import { materializePublishManifest } from './prepare-bundled-package.mjs';
+import { publicInstallClosure } from './public-install-closure.mjs';
 import { GROK_PUBLIC_INSTALL_IMAGE, GROK_PUBLIC_INSTALL_LIFECYCLE, assertInstalledNativeConsumerContinuity, assertNoBundledCodexPayloads, grokConsumerDockerArgs, installedCodexProbeSource, installedDaemonProbeSource, macNodeHeadersDirectory, macPublicInstallLifecycleProfile, macInstalledStartupProbeSource, runMacInitialInstallWithDiagnostics } from './grok-public-install-sandbox.mjs';
 import { startPrefetch, stopPrefetches } from './prefetch-child.mjs';
 import { retainRunnerQualificationPackages } from './retain-runner-qualification-packages.mjs';
@@ -229,18 +230,10 @@ try {
   // Provision as the unprivileged verification user, never into the host's /opt.
   // Only the positive probe sees this file at the canonical sandbox path.
   const grokReady = prefetch('grok', process.execPath, [join(repo, 'packages/paperclip-runner/scripts/provision-grok.mjs'), stagedGrok]);
-  const listing = run(process.execPath, [join(repo, 'scripts/release-package-map.mjs'), 'list'], repo).toString().trim().split('\n').map(line => line.split('\t'));
-  const packages = new Map(listing.map(([dir, name]) => [name, { dir, manifest: JSON.parse(readFileSync(join(repo, dir, 'package.json'), 'utf8')) }]));
-  const needed = new Set();
-  function visit(name) {
-    if (needed.has(name)) return;
-    const entry = packages.get(name); assert.ok(entry, `Missing public workspace dependency ${name}`); needed.add(name);
-    for (const [dep, spec] of Object.entries({ ...entry.manifest.dependencies, ...entry.manifest.optionalDependencies })) {
-      if (spec.startsWith('workspace:')) visit(dep);
-    }
-  }
-  visit('@paperclipai/server');
-  visit('paperclipai');
+  // The server, the CLI and every public workspace package they reach through
+  // `workspace:` specs. The npm cache warm-up reads the same closure, so both
+  // take it from one module.
+  const { packages, needed } = publicInstallClosure(repo);
   // release.sh also builds the standalone public packages (the sandbox-provider
   // plugins outside the pnpm workspace) before it stages anything, because it
   // publishes them. Nothing staged here reaches them: `needed` is closed under
@@ -340,7 +333,13 @@ try {
   }
   const assets = join(root, 'assets'); mkdirSync(assets, { mode: 0o755 });
   const consumer = join(root, 'consumer'); mkdirSync(consumer);
-  const cache = join(root, 'cache'); mkdirSync(cache);
+  // CI can point this at a cache that scripts/warm-public-install-npm-cache.mjs
+  // filled with the same public registry graph while `pnpm build` ran. npm
+  // checks every cached tarball against the integrity its own resolution
+  // records, so a warm cache changes where bytes come from, never what is
+  // installed; the consumer directory and its lock still start empty.
+  const cache = process.env.PAPERCLIP_PUBLIC_INSTALL_NPM_CACHE ? resolve(process.env.PAPERCLIP_PUBLIC_INSTALL_NPM_CACHE) : join(root, 'cache');
+  mkdirSync(cache, { recursive: true });
   writeFileSync(join(consumer, 'package.json'), JSON.stringify({ private: true, type: 'module' }));
   for (const tarball of tarballs) {
     const destination = join(assets, basename(tarball)); cpSync(tarball, destination); chmodSync(destination, 0o644);

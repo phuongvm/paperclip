@@ -45,6 +45,7 @@ const apiPrefixes: Record<string, string> = {
   "costs.ts": "/api",
   "dashboard.ts": "/api",
   "dot-runner.ts": "/api",
+  "grok-bot.ts": "/api",
   "decision-queues.ts": "/api",
   "decisions.ts": "/api",
   "decision-training.ts": "/api",
@@ -247,11 +248,11 @@ function loadActualRoutes() {
         }
       }
     }
-    if (file === "dot-runner.ts") {
-      for (const name of ["path", "invitePath"]) {
+    if (file === "dot-runner.ts" || file === "grok-bot.ts") {
+      for (const name of file === "dot-runner.ts" ? ["path", "invitePath"] : ["path"]) {
         const basePath = new RegExp(`const ${name} = "([^"]+)"`).exec(source)?.[1];
         if (!basePath) throw new Error(`Dot ${name} route prefix is missing`);
-        const methods = new RegExp(`router\\.(get|post|delete)\\(${name}(?: \\+ "([^"]+)")?`, "g");
+        const methods = new RegExp(`router\\.(get|post|put|delete)\\(${name}(?: \\+ "([^"]+)")?`, "g");
         for (const match of source.matchAll(methods)) {
           routes.add(`${match[1].toUpperCase()} ${normalizeExpressPath(prefix + basePath + (match[2] ?? ""))}`);
         }

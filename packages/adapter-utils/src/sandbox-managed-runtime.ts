@@ -1335,9 +1335,6 @@ export async function prepareSandboxManagedRuntime(input: {
   );
   const workspaceRestoreExclude = mergeExcludes(restoreExclude, repositories.map((repo) => repo.path));
   // The baseline "before" snapshot: a recursive walk of the whole workspace that
-  // `lstat`s every entry and SHA-256-hashes every file's bytes. This is the
-  // dominant cost in the pre-`pack` window — it reads the content of every
-  // non-excluded file, serially — so it earns its own span.
   baselineSnapshot = syncWorkspace
     ? (input.workspaceBaseline ??
       (await runStepSpan("snapshot.baseline", () =>
