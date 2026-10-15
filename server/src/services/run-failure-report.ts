@@ -193,6 +193,14 @@ function isProviderQuotaFailure(run: HeartbeatRun, options: RunFailureReportOpti
     options.phase !== "setup" && run.signal == null;
 }
 
+function isCodexAcpModelCapacityFailure(run: HeartbeatRun, options: RunFailureReportOptions): boolean {
+  const result = asRecord(run.resultJson);
+  return run.status === "failed" && run.errorCode === "codex_transient_upstream" &&
+    result?.errorFamily === "transient_upstream" &&
+    asRecord(result.terminalSessionFailure)?.category === "service" &&
+    options.phase !== "setup" && run.signal == null;
+}
+
 /**
  * The Grok endpoint refused every work wake with an HTTP 4xx, so the offer
  * expired unaccepted. Durable delivery receipts prove the external cause. A
@@ -236,6 +244,7 @@ export function reportRunFailure(db: Db, run: HeartbeatRun, options: RunFailureR
     isLocalPathWorkspaceConfigurationBlocker(run, options) ||
     isGitConnectionFailure(run, options) ||
     isProviderQuotaFailure(run, options) ||
+    isCodexAcpModelCapacityFailure(run, options) ||
     isRestartInterruptedSetup(run)
   )) return Promise.resolve();
   const runStatus = run.status;

@@ -3,10 +3,11 @@ import { hasPendingNativeChildCompletion } from "./native-child-completion-deliv
 import { dismissAutomaticCompletionReviews, decisionHasRetiredAutomaticReview } from "./automatic-completion-reviews.js";
 import { logger } from "../../middleware/logger.js";
 import { createHash, randomUUID } from "node:crypto";
-import { and, asc, desc, eq, gt, inArray, isNotNull, isNull, lte, notInArray, or, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gt, inArray, isNotNull, isNull, lte, ne, notInArray, or, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import {
   completionContracts,
+  agents,
   heartbeatRunEvents,
   heartbeatRuns,
   issueWorkProducts,
@@ -54,6 +55,12 @@ import {
   type NativeAuthoritativeIssueStatus,
   type NativeStatusDecision,
 } from "./status-arbiter.js";
+
+import { getNativeReviewAssignment } from "./native-review-participant.js";
+import { evaluateAgentInvokabilityFromDb } from "../agent-invokability.js";
+import { isAutomaticRecoverySuppressedByPauseHold } from "../recovery/pause-hold-guard.js";
+import { readRunCancellation } from "../run-cancellation.js";
+import { appendHeartbeatRunEvent } from "../heartbeat-run-events.js";
 
 export type NativeReconciliationFacts = {
   equivalentAttentionFamily?: boolean;
@@ -343,7 +350,7 @@ export async function claimNativeSessionResumptions(input: {
 }): Promise<NativeSessionResumeClaim[]> {
   const now = input.now ?? new Date();
   const candidates = await input.db
-    .select({ runId: heartbeatRuns.id })
+    .select({ runId: heartbeatRuns.id, companyId: heartbeatRuns.companyId, issueId: nativeRunFinalizations.issueId })
     .from(heartbeatRuns)
     .innerJoin(
       nativeRunFinalizations,
@@ -371,6 +378,7 @@ export async function claimNativeSessionResumptions(input: {
           : []),
       ),
     )
+    .orderBy(sql`${nativeRunFinalizations.nextAttemptAt} asc nulls first`, asc(nativeRunFinalizations.runId))
     .limit(input.limit ?? 25);
 
   const claims: NativeSessionResumeClaim[] = [];
@@ -378,16 +386,21 @@ export async function claimNativeSessionResumptions(input: {
     const leaseOwner = `${input.runnerInstanceId}:resume:${randomUUID()}`;
     let terminalRunToEmit: typeof heartbeatRuns.$inferSelect | null = null;
     const claimed = await input.db.transaction(async (tx) => {
-      const row = await tx.select({
-        run: heartbeatRuns,
-        coordinator: nativeRunFinalizations,
-      }).from(heartbeatRuns)
-        .innerJoin(nativeRunFinalizations, eq(nativeRunFinalizations.runId, heartbeatRuns.id))
-        .where(eq(heartbeatRuns.id, candidate.runId))
-        .for("update")
-        .limit(1)
-        .then((rows) => rows[0] ?? null);
-      if (!row) return false;
+      await tx.execute(sql`select set_config('statement_timeout', '10000', true), set_config('lock_timeout', '2000', true)`);
+      const [issue] = await tx.select().from(issues).where(and(
+        eq(issues.companyId, candidate.companyId), eq(issues.id, candidate.issueId),
+      )).for("update").limit(1);
+      if (!issue || !["todo", "in_progress", "in_review"].includes(issue.status)) return false;
+      const [coordinator] = await tx.select().from(nativeRunFinalizations).where(and(
+        eq(nativeRunFinalizations.companyId, candidate.companyId), eq(nativeRunFinalizations.runId, candidate.runId),
+        eq(nativeRunFinalizations.issueId, issue.id),
+      )).for("update").limit(1);
+      const [run] = await tx.select().from(heartbeatRuns).where(and(
+        eq(heartbeatRuns.companyId, candidate.companyId), eq(heartbeatRuns.id, candidate.runId),
+        eq(heartbeatRuns.nativeIssueId, issue.id),
+      )).for("update").limit(1);
+      if (!run || !coordinator) return false;
+      const row = { run, coordinator };
       if (
         row.run.runtimeMode !== "native" ||
         isNativeRunnerOwnershipHeld(row.run) ||
@@ -404,10 +417,37 @@ export async function claimNativeSessionResumptions(input: {
       )
         return false;
 
+      if ((issue.executionRunId && issue.executionRunId !== run.id) ||
+          (issue.checkoutRunId && issue.checkoutRunId !== run.id)) return false;
+      const [agent] = await tx.select().from(agents).where(and(
+        eq(agents.companyId, candidate.companyId), eq(agents.id, run.agentId),
+      )).limit(1);
+      if (!agent || !(await evaluateAgentInvokabilityFromDb(tx as unknown as Db, agent)).invokable) return false;
+      if (issue.assigneeAgentId !== run.agentId && !await getNativeReviewAssignment(tx as unknown as Db, {
+        companyId: run.companyId, issueId: issue.id, agentId: run.agentId,
+        contextSnapshot: run.contextSnapshot,
+      })) return false;
+      if (await isAutomaticRecoverySuppressedByPauseHold(tx as unknown as Db, run.companyId, issue.id)) return false;
+      if (!(await issueService(tx as unknown as Db).getDependencyReadiness(issue.id, tx)).isDependencyReady) return false;
+      const [competing] = await tx.select({ id: heartbeatRuns.id }).from(heartbeatRuns).where(and(
+        eq(heartbeatRuns.companyId, run.companyId), ne(heartbeatRuns.id, run.id),
+        inArray(heartbeatRuns.status, issue.executionRunId === run.id
+          ? ["running", "scheduled_retry"] : ["queued", "running", "scheduled_retry"]),
+        or(eq(heartbeatRuns.issueId, issue.id), eq(heartbeatRuns.nativeIssueId, issue.id),
+          sql`${heartbeatRuns.contextSnapshot}->>'issueId' = ${issue.id}`),
+      )).limit(1);
+      if (competing) return false;
+
       const profile = row.run.runnerProfileJson ?? {};
       const persistedInput = profile.nativeExecutionInput;
       const checkpoint = profile.sessionCheckpoint;
       const failureDetail = record(row.coordinator.failureDetail);
+      const cancellation = readRunCancellation(run.resultJson);
+      const nativeCancellation = record(record(run.resultJson).nativeCancellation);
+      if ((cancellation?.source === "operator" && cancellation.expected) ||
+          (["run", "issue"].includes(String(nativeCancellation.scope)) &&
+            ["pending", "acknowledged"].includes(String(nativeCancellation.dispatchState))) ||
+          typeof failureDetail.successorRunId === "string") return false;
       const originalFailureCode =
         typeof failureDetail.originalFailureCode === "string"
           ? failureDetail.originalFailureCode
@@ -534,7 +574,24 @@ export async function claimNativeSessionResumptions(input: {
         nativePhaseUpdatedAt: now,
         updatedAt: now,
       }).where(eq(heartbeatRuns.id, row.run.id));
+      await tx.update(issues).set({
+        executionRunId: run.id,
+        executionAgentNameKey: agent.name.trim().toLowerCase() || null,
+        executionLockedAt: now,
+        updatedAt: now,
+      }).where(and(eq(issues.id, issue.id), eq(issues.companyId, run.companyId)));
+      if (issue.executionRunId !== run.id) await appendHeartbeatRunEvent(tx as unknown as Db, {
+        companyId: run.companyId, runId: run.id, agentId: run.agentId,
+        eventType: "native.recovery.execution_reclaimed", stream: "system", level: "info",
+        message: "Reclaimed the original task execution for native session recovery.",
+        payload: { issueId: issue.id },
+      });
       return true;
+    }).catch((error: unknown) => {
+      terminalRunToEmit = null;
+      logger.warn({ err: error, companyId: candidate.companyId, runId: candidate.runId },
+        "failed to claim native session recovery candidate");
+      return false;
     });
     // Telemetry is best-effort background work; it must not delay claiming
     // the remaining candidates in this loop, so fire it and do not await it.
@@ -543,6 +600,24 @@ export async function claimNativeSessionResumptions(input: {
       void reportRunFailure(input.db, terminalRunToEmit);
     }
     if (claimed) claims.push({ runId: candidate.runId, leaseOwner });
+    else await input.db.transaction(async tx => {
+      await tx.execute(sql`select set_config('statement_timeout', '10000', true), set_config('lock_timeout', '2000', true)`);
+      await tx.update(nativeRunFinalizations).set({
+        nextAttemptAt: new Date(now.getTime() + 30_000),
+        updatedAt: now,
+      }).where(and(
+        eq(nativeRunFinalizations.companyId, candidate.companyId),
+        eq(nativeRunFinalizations.issueId, candidate.issueId),
+        eq(nativeRunFinalizations.runId, candidate.runId),
+        eq(nativeRunFinalizations.phase, "retryable_failure"),
+        isNull(nativeRunFinalizations.resultId),
+        or(isNull(nativeRunFinalizations.nextAttemptAt), lte(nativeRunFinalizations.nextAttemptAt, now)),
+        or(isNull(nativeRunFinalizations.leaseOwner), isNull(nativeRunFinalizations.leaseExpiresAt), lte(nativeRunFinalizations.leaseExpiresAt, now)),
+      ));
+    }).catch((error: unknown) => {
+      logger.warn({ err: error, companyId: candidate.companyId, runId: candidate.runId },
+        "failed to defer native session recovery candidate");
+    });
   }
   return claims;
 }
