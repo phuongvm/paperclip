@@ -399,7 +399,7 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
       // A Dot binding has one external turn. Competing assignments must retain
       // their queue position instead of claiming a second run that cannot bind.
       maxConcurrentRuns: agent.adapterType === "paperclip_runner" &&
-        parseObject(agent.adapterConfig).provider === "openai_dot"
+        ["openai_dot", "grok_bot"].includes(String(parseObject(agent.adapterConfig).provider))
         ? 1 : normalizeMaxConcurrentRuns(heartbeat.maxConcurrentRuns),
       skipTimerWhenNoActionableWork: asBoolean(
         heartbeat.skipTimerWhenNoActionableWork ??
@@ -2215,7 +2215,7 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
         dotRequest.companyId !== agent.companyId || dotRequest.issueId !== issueId ||
         dotRequest.requestId !== payload?.dotRequestId || source !== "assignment" ||
         opts.requestedByActorType !== "agent" || opts.requestedByActorId !== agentId ||
-        agent.adapterType !== "paperclip_runner" || parseObject(agent.adapterConfig).provider !== "openai_dot" ||
+        agent.adapterType !== "paperclip_runner" || !["openai_dot", "grok_bot"].includes(String(parseObject(agent.adapterConfig).provider)) ||
         opts.idempotencyKey !== dotRequest.idempotencyKey)) {
       throw conflict("Dot work request does not match its admission authority.");
     }
@@ -3655,8 +3655,8 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
             // Offer the input to the active Dot, but keep a durable queued wake
             // until it reads the comment. A finish racing the event tick must
             // leave unread input available for the next assignment.
-            const dotBindingId = readNonEmptyString(parseObject(agent.adapterConfig).dotBindingId);
-            const dotFollowUp = agent.adapterType === "paperclip_runner" && parseObject(agent.adapterConfig).provider === "openai_dot"
+            const dotBindingId = readNonEmptyString(parseObject(agent.adapterConfig)[parseObject(agent.adapterConfig).provider === "grok_bot" ? "externalBindingId" : "dotBindingId"]);
+            const dotFollowUp = agent.adapterType === "paperclip_runner" && ["openai_dot", "grok_bot"].includes(String(parseObject(agent.adapterConfig).provider))
                 && dotBindingId && activeExecutionRun.agentId === agentId && issue.assigneeAgentId === agentId
                 && reason === "issue_commented" && wakeCommentId && opts.allowRunCoalescing !== false
                 && enrichedContextSnapshot.forceFreshSession !== true && !explicitResumeSession && !opts.manualUserWake
@@ -4041,6 +4041,7 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
                 ? withQueuedCommentIdsInRunContext(
                     enrichedContextSnapshot,
                     adoptedCommentIds,
+                    adoptedComments.map((wake) => wake.id),
                   )
                 : enrichedContextSnapshot,
               sessionIdBefore: explicitContinuation ? null : sessionBefore,

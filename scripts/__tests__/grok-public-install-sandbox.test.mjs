@@ -9,6 +9,7 @@ import { fileURLToPath } from 'node:url';
 import { isWorkspacePackage, parseWorkspaceEntries } from '../build-standalone-public-packages.mjs';
 import { GROK_PUBLIC_INSTALL_IMAGE, GROK_PUBLIC_INSTALL_LIFECYCLE, assertInstalledCodexPlatformProvenance, assertInstalledNativeConsumerContinuity, assertNoBundledCodexPayloads, grokConsumerDockerArgs, installedCodexProbeSource, installedDaemonProbeSource, macNodeHeadersDirectory, macPublicInstallLifecycleProfile, macInstalledStartupProbeSource, runMacInitialInstallWithDiagnostics } from '../grok-public-install-sandbox.mjs';
 import { verifyPiPackagedDaemon } from '../pi-public-install-probe.mjs';
+import { publicInstallClosure } from '../public-install-closure.mjs';
 import { runnerBinaryTarget } from '../../packages/paperclip-runner/src/live/runner-binary.ts';
 
 const paths = { assets: '/private/staging/assets', consumer: '/private/staging/consumer', cache: '/private/staging/cache', uid: 1001, gid: 1001 };
@@ -209,7 +210,7 @@ test('the image and Grok downloads start before staging and join without weakeni
   assert.ok(source.includes("const stagedGrok = join(prefetched, 'grok')"));
   assert.doesNotMatch(source, /provision-grok\.mjs'\), prerequisite\]/);
   // Both downloads start before any package is staged and before the first sandbox runs.
-  const staging = position("visit('@paperclipai/server')");
+  const staging = position('publicInstallClosure(repo)');
   const firstSandbox = position("isolated(['npm', 'install', '--ignore-scripts', '--omit=dev'");
   assert.ok(imagePull < staging && grokProvision < staging);
   assert.ok(position("await awaited('image', imageReady)") < firstSandbox);
@@ -284,17 +285,8 @@ test('the verifier stages only workspace packages, so it skips the standalone bu
   const retention = readFileSync(new URL('../retain-runner-qualification-packages.mjs', import.meta.url), 'utf8');
   assert.ok(retention.includes("const pluginRelative = 'packages/plugins/sandbox-providers/daytona';") && retention.includes("cpSync(join(repo, pluginRelative, 'dist'), join(plugin, 'dist'), { recursive: true })"), 'retention still packs the Daytona plugin from its dist, which is why the gated build exists');
   const repo = new URL('../../', import.meta.url);
-  const listing = spawnSync(process.execPath, [fileURLToPath(new URL('scripts/release-package-map.mjs', repo)), 'list'], { cwd: fileURLToPath(repo), encoding: 'utf8' });
-  assert.equal(listing.status, 0, listing.stderr);
-  const packages = new Map(listing.stdout.trim().split('\n').map(line => line.split('\t')).map(([dir, name]) => [name, { dir, manifest: JSON.parse(readFileSync(new URL(`${dir}/package.json`, repo), 'utf8')) }]));
-  const needed = new Set();
-  const visit = name => {
-    if (needed.has(name)) return;
-    const entry = packages.get(name); assert.ok(entry, `missing public workspace dependency ${name}`); needed.add(name);
-    for (const [dep, spec] of Object.entries({ ...entry.manifest.dependencies, ...entry.manifest.optionalDependencies })) if (spec.startsWith('workspace:')) visit(dep);
-  };
-  assert.ok(source.includes("visit('@paperclipai/server');\n  visit('paperclipai');"));
-  visit('@paperclipai/server'); visit('paperclipai');
+  assert.ok(source.includes('const { packages, needed } = publicInstallClosure(repo);'));
+  const { packages, needed } = publicInstallClosure(fileURLToPath(repo));
   const workspace = parseWorkspaceEntries(readFileSync(new URL('pnpm-workspace.yaml', repo), 'utf8'));
   const standalone = [...packages.values()].filter(({ dir }) => !isWorkspacePackage(dir, workspace)).map(({ dir }) => dir);
   assert.ok(standalone.length > 0, 'the public package map must still carry standalone packages for this check to mean anything');
@@ -307,7 +299,7 @@ test('the verifier stages only workspace packages, so it skips the standalone bu
   assert.deepEqual(JSON.parse(readFileSync(new URL('server/package.json', repo), 'utf8')).files, ['dist', 'ui-dist', 'skills']);
   assert.ok(source.includes("PAPERCLIP_RELEASE_REUSE_UI_DIST: '1'"));
   const uiDist = position("run('bash', [join(repo, 'scripts/prepare-server-ui-dist.sh')], repo)");
-  assert.ok(position("visit('paperclipai')") < gate && gate < uiDist && uiDist < position('timing.stage_ui_dist_ms =') && uiDist < position('const stageSource = '));
+  assert.ok(position('publicInstallClosure(repo)') < gate && gate < uiDist && uiDist < position('timing.stage_ui_dist_ms =') && uiDist < position('const stageSource = '));
 });
 
 test('the installed Codex probe exercises the public export and rejects incomplete or mismatched packages', () => {

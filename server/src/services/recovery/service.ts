@@ -1,4 +1,5 @@
 import { isAgentAwaitingSetup } from "../../modules/agent-lifecycle/index.js";
+import { onboardingFirstTaskAwaitingUserSql } from "./onboarding-first-task-wait.js";
 import { isAiAuthenticationBlocked } from "../ai-auth-failure.js";
 import { hasCommittedNativePlanWait } from "../native-runtime/native-plan-wait.js";
 import { isNativeWorkspaceExportRepairCause } from "@paperclipai/shared";
@@ -13,6 +14,7 @@ import {
   LEGACY_DISPOSITION_REPAIR_INSTRUCTION, type LegacyDispositionEpisode,
 } from "./legacy-continuation.js";
 import { hasLiveLegacyController } from "../legacy-controller-lease.js";
+import { isCompletedOnboardingHandoffWake } from "../chat-completion-delivery.js";
 import { instanceSettingsService } from "../instance-settings.js";
 import { isWaitingConversation, settleConversationTurn, deliverConversationComments } from "../agent-conversations.js";
 import {
@@ -2076,40 +2078,9 @@ export function recoveryService(
     issue: typeof issues.$inferSelect,
   ) {
     if (issue.originKind !== ONBOARDING_FIRST_TASK_ORIGIN_KIND) return false;
-    const userComment = await db
-      .select({ id: issueComments.id })
-      .from(issueComments)
-      .where(
-        and(
-          eq(issueComments.companyId, issue.companyId),
-          eq(issueComments.issueId, issue.id),
-          or(
-            eq(issueComments.authorType, "user"),
-            and(
-              isNull(issueComments.authorType),
-              sql`${issueComments.authorUserId} is not null`,
-            ),
-          ),
-        ),
-      )
-      .limit(1)
-      .then((rows) => rows[0] ?? null);
-    if (userComment !== null) return false;
-    // Answering the seeded opening card ("interview me" / "I have a task in
-    // mind") is the user's first input too, even though it is not a comment.
-    const userResolvedInteraction = await db
-      .select({ id: issueThreadInteractions.id })
-      .from(issueThreadInteractions)
-      .where(
-        and(
-          eq(issueThreadInteractions.companyId, issue.companyId),
-          eq(issueThreadInteractions.issueId, issue.id),
-          sql`${issueThreadInteractions.resolvedByUserId} is not null`,
-        ),
-      )
-      .limit(1)
-      .then((rows) => rows[0] ?? null);
-    return userResolvedInteraction === null;
+    const [result] = await db.execute<{ awaiting: boolean }>(sql`SELECT
+      ${onboardingFirstTaskAwaitingUserSql(sql`${issue.companyId}`, sql`${issue.id}`, sql`${issue.originKind}`)} AS awaiting`);
+    return result?.awaiting === true;
   }
 
   async function isInvocationBudgetBlocked(
@@ -5938,13 +5909,21 @@ export function recoveryService(
     const isTerminalSessionGoalControl =
       runContext.resumeIntent === true &&
       readNonEmptyString(runContext.goalControlRequestId) !== null;
+    const issueId = issueIdFromRunContext(run.contextSnapshot);
+    const preservesTerminalIssueReport = isTerminalSessionGoalControl ||
+      (issueId !== null && await isCompletedOnboardingHandoffWake(db, {
+        companyId: run.companyId,
+        issueId,
+        agentId: run.agentId,
+        reason: readNonEmptyString(runContext.wakeReason),
+        contextSnapshot: runContext,
+      }));
     let issueTerminalStatus: "succeeded" | "cancelled" | null =
-      isTerminalSessionGoalControl
+      preservesTerminalIssueReport
         ? null
         : (options?.referencingIssueTerminalStatus ?? null);
-    const issueId = issueIdFromRunContext(run.contextSnapshot);
     if (
-      !isTerminalSessionGoalControl &&
+      !preservesTerminalIssueReport &&
       !issueTerminalStatus &&
       !options?.runReferencedByActiveIssue &&
       issueId

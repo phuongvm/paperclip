@@ -788,6 +788,25 @@ jobs:
             pnpm install --frozen-lockfile
           fi
 
+      # The public-install verifier at the end of this lane downloads the whole
+      # public registry graph into an empty npm cache: its consumer install
+      # took 119-129s of the 226-241s step, more than half of this ~415-446s
+      # lane, in runs 38426120144, 38432086560 and 38423713537 (2026-10-13).
+      # That graph is fixed by source manifests, so this fetches it in the
+      # background while the Rust restore, Evalbook and `pnpm build` run, about
+      # 150s before the verifier installs anything. Only the cache is handed
+      # over, and the verify step waits for this first. A failed or partial
+      # warm-up leaves the verifier to fetch what is missing as before.
+      - name: Start warming the public-install npm cache
+        if: ${{ hashFiles('scripts/warm-public-install-npm-cache.mjs') != '' }}
+        run: |
+          (
+            # The default `bash -e` would skip the status line on a failure.
+            set +e
+            PAPERCLIP_PUBLIC_INSTALL_NPM_CACHE="$RUNNER_TEMP/public-install-npm-cache" node scripts/warm-public-install-npm-cache.mjs
+            echo $? > "$RUNNER_TEMP/public-install-npm-cache.status"
+          ) > "$RUNNER_TEMP/public-install-npm-cache.log" 2>&1 &
+
       # pnpm build reaches the Runner package's build:binary step; without the
       # shared Rust cache that is a ~3m40s cold compile of all third-party
       # crates (run 35036001734, 2026-09-15). Same restore-only contract as
@@ -914,7 +933,20 @@ jobs:
       # docker-runner-check.yml runs the same verifier after `pnpm build`.
       - name: Verify built-in Grok from a clean public npm install
         if: ${{ hashFiles('scripts/verify-grok-npm-install.mjs') != '' }}
-        run: node scripts/verify-grok-npm-install.mjs
+        run: |
+          status="$RUNNER_TEMP/public-install-npm-cache.status"
+          if [ -f "$RUNNER_TEMP/public-install-npm-cache.log" ]; then
+            # Normally finished long before this; never let it hold the lane.
+            for _ in $(seq 180); do [ -f "$status" ] && break; sleep 1; done
+            if [ "$(cat "$status" 2>/dev/null)" = 0 ]; then
+              tail -n 1 "$RUNNER_TEMP/public-install-npm-cache.log"
+            else
+              echo '::notice title=Public-install npm cache::warm-up did not finish cleanly; the verifier fetches what is missing'
+              tail -n 20 "$RUNNER_TEMP/public-install-npm-cache.log"
+            fi
+            export PAPERCLIP_PUBLIC_INSTALL_NPM_CACHE="$RUNNER_TEMP/public-install-npm-cache"
+          fi
+          node scripts/verify-grok-npm-install.mjs
 
   verify_serialized_server:
     name: Verify serialized server suites (${{ matrix.shard_label }})

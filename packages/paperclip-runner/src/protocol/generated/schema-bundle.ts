@@ -1043,7 +1043,8 @@ export const providerDescriptorSchema = {
         "claude_managed",
         "aws_agentcore",
         "acpx",
-        "openai_dot"
+        "openai_dot",
+        "grok_bot"
       ]
     },
     "driver": {
@@ -1053,7 +1054,8 @@ export const providerDescriptorSchema = {
         "claude_managed_agents_api",
         "aws_agentcore_harness_api",
         "acpx_runtime",
-        "openai_dot_mcp"
+        "openai_dot_mcp",
+        "grok_bot_mcp"
       ]
     },
     "model": {
@@ -1078,7 +1080,8 @@ export const providerDescriptorSchema = {
       "enum": [
         "anthropic_managed_agents",
         "aws_bedrock_agentcore_harness",
-        "openai_dot"
+        "openai_dot",
+        "grok_bot"
       ]
     },
     "providerSessionId": {
@@ -1280,6 +1283,19 @@ export const providerDescriptorSchema = {
               "const": "remote_service"
             }
           }
+        },
+        {
+          "properties": {
+            "provider": {
+              "const": "grok_bot"
+            },
+            "driver": {
+              "const": "grok_bot_mcp"
+            },
+            "executionKind": {
+              "const": "remote_service"
+            }
+          }
         }
       ]
     },
@@ -1406,6 +1422,38 @@ export const providerDescriptorSchema = {
         "properties": {
           "service": {
             "const": "openai_dot"
+          },
+          "model": {
+            "const": null
+          },
+          "providerSessionId": {
+            "const": null
+          },
+          "agentProcessId": {
+            "const": null
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "provider": {
+            "const": "grok_bot"
+          }
+        },
+        "required": [
+          "provider"
+        ]
+      },
+      "then": {
+        "required": [
+          "service",
+          "providerSessionId"
+        ],
+        "properties": {
+          "service": {
+            "const": "grok_bot"
           },
           "model": {
             "const": null

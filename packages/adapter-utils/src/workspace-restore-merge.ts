@@ -147,21 +147,37 @@ async function hashFile(filePath: string): Promise<string> {
 async function* walkDirectory(
   root: string, exclude: readonly string[], ignored: ReturnType<typeof workspacePathMatcher>, relative = "",
 ): AsyncGenerator<[string, SnapshotEntry]> {
+  const readEntry = async (nextRelative: string): Promise<[string, SnapshotEntry | null]> => {
+    const fullPath = path.join(root, nextRelative);
+    const stats = await fs.lstat(fullPath);
+    if (stats.isDirectory()) return [nextRelative, { kind: "dir" }];
+    if (stats.isSymbolicLink()) return [nextRelative, { kind: "symlink", target: await fs.readlink(fullPath) }];
+    if (stats.isFile()) return [nextRelative, { kind: "file", mode: stats.mode, hash: await hashFile(fullPath) }];
+    return [nextRelative, null];
+  };
+  const visitBatch = async function* (paths: string[]): AsyncGenerator<[string, SnapshotEntry]> {
+    const results = await Promise.allSettled(paths.map(readEntry));
+    for (const result of results) if (result.status === "rejected") throw result.reason;
+    for (const result of results) {
+      if (result.status !== "fulfilled") continue;
+      const [nextRelative, entry] = result.value;
+      if (!entry) continue;
+      yield [nextRelative, entry];
+      if (entry.kind === "dir") yield* walkDirectory(root, exclude, ignored, nextRelative);
+    }
+  };
   const current = relative ? path.join(root, relative) : root;
+  let batch: string[] = [];
   for await (const entry of await fs.opendir(current)) {
     const nextRelative = relative ? path.posix.join(relative, entry.name) : entry.name;
     if (shouldExcludePath(nextRelative, exclude) || ignored.matches(nextRelative)) continue;
-    const fullPath = path.join(root, nextRelative);
-    const stats = await fs.lstat(fullPath);
-    if (stats.isDirectory()) {
-      yield [nextRelative, { kind: "dir" }];
-      yield* walkDirectory(root, exclude, ignored, nextRelative);
-    } else if (stats.isSymbolicLink()) {
-      yield [nextRelative, { kind: "symlink", target: await fs.readlink(fullPath) }];
-    } else if (stats.isFile()) {
-      yield [nextRelative, { kind: "file", mode: stats.mode, hash: await hashFile(fullPath) }];
+    batch.push(nextRelative);
+    if (batch.length === 16) {
+      yield* visitBatch(batch);
+      batch = [];
     }
   }
+  if (batch.length) yield* visitBatch(batch);
 }
 
 async function readSnapshotEntry(root: string, relative: string): Promise<SnapshotEntry | null> {
@@ -200,6 +216,14 @@ function entriesMatch(left: SnapshotEntry | null | undefined, right: SnapshotEnt
     return left.mode === right.mode && left.hash === right.hash;
   }
   return false;
+}
+
+function directorySnapshotsMatch(left: DirectorySnapshot, right: DirectorySnapshot): boolean {
+  if (left.entries.size !== right.entries.size) return false;
+  for (const [relative, entry] of right.entries) {
+    if (!entriesMatch(left.entries.get(relative), entry)) return false;
+  }
+  return true;
 }
 
 const LOCK_WAIT_MS = 30_000;
@@ -703,6 +727,10 @@ export async function mergeDirectoryWithBaseline(input: {
   try {
     await withDirectoryMergeLock(input.targetDir, async (canonicalTargetDir) => {
       await input.beforeApply?.();
+      if (!input.snapshots?.current && directorySnapshotsMatch(input.baseline, source)) {
+        await input.afterApply?.();
+        return;
+      }
       // Strict preflight must see excluded children before a directory is
       // replaced. The merge still applies only the filtered source/baseline.
       const current = input.snapshots?.current ?? await captureDirectorySnapshot(canonicalTargetDir,
