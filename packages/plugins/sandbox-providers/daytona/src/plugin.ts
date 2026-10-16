@@ -48,6 +48,7 @@ import type {
 } from "@paperclipai/plugin-sdk";
 import { performSyncIn, performSyncOut, withProviderSpan } from "./file-sync.js";
 import { DEFAULT_DAYTONA_OPERATION_TIMEOUT_MS } from "./manifest.js";
+import { observeSessionStreamExit } from "./session-stream-exit.js";
 
 // The Claude `setup-token` login pseudo-terminal (PTY) session for this provider.
 // The session runs the login command on a real pseudo-terminal, streams the
@@ -2050,6 +2051,7 @@ async function runSessionLogStream(
   while (true) {
     let streamClosed = false;
     let acceptingOutput = true;
+    let exitObservation: ReturnType<typeof observeSessionStreamExit> | undefined;
     let idleTimer: ReturnType<typeof setTimeout> | undefined;
     let signalIdle!: () => void;
     const idle = new Promise<"idle">((resolve) => { signalIdle = () => resolve("idle"); });
@@ -2065,15 +2067,24 @@ async function runSessionLogStream(
     };
     try {
       armIdleTimer();
-      const outcome = await withinCommandDeadline(commandDeadline, () => Promise.race([
-        sandbox.process.getSessionCommandLogs(
-          sessionId,
-          commandId,
-          (chunk) => receive("stdout", chunk),
-          (chunk) => receive("stderr", chunk),
-        ).then(() => "closed" as const),
-        idle,
-      ]));
+      const observed = await withinCommandDeadline(commandDeadline, () => {
+        exitObservation = observeSessionStreamExit(Promise.race([
+          sandbox.process.getSessionCommandLogs(
+            sessionId,
+            commandId,
+            (chunk) => receive("stdout", chunk),
+            (chunk) => receive("stderr", chunk),
+          ).then(() => "closed" as const),
+          idle,
+        ]), async () => {
+          const status = await observeSessionCommand(Math.min(timeoutMs, SESSION_INITIAL_STATUS_TIMEOUT_MS),
+            () => sandbox.process.getSessionCommand(sessionId, commandId), commandDeadline);
+          return typeof status.exitCode === "number" ? status.exitCode : null;
+        });
+        return exitObservation.result;
+      });
+      if (observed.kind === "exit") return { exitCode: observed.exitCode, pollUntilExit: false, buffer };
+      const outcome = observed.value;
       if (outcome === "idle") {
         // Do not wait for the abandoned socket or open another one. The SDK
         // exposes no cancellation handle. Fence its callbacks before the
@@ -2089,6 +2100,7 @@ async function runSessionLogStream(
       // The SDK exposes no cancellation handle for this socket. Session
       // teardown owns closing it; late data cannot change a settled execution.
       acceptingOutput = false;
+      exitObservation?.stop();
       clearTimeout(idleTimer);
     }
     if (streamClosed) {

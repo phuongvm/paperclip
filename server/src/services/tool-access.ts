@@ -1,4 +1,5 @@
 import { stableHash, descriptorHash } from "./tool-catalog-hash.js";
+import { assertProfileEntryInputs, assertProfileEntryShape } from "./tool-profile-entry-validation.js";
 import { DAYTONA_TOOLS, daytonaClient, daytonaRisk, isDaytonaConnection, isDaytonaToolName } from "./daytona.js";
 import { chatCredentialMutationLease } from "./chat-credential-mutation-lease.js";
 import { notifyChatEndpointWork } from "./chat-work-notifications.js";
@@ -5869,21 +5870,7 @@ export function toolAccessService(
     companyId: string,
     input: CreateToolProfileEntryForProfile,
   ) {
-    if (input.selectorType === "application" && !input.applicationId) {
-      throw badRequest("Application profile entries require applicationId");
-    }
-    if (input.selectorType === "connection" && !input.connectionId) {
-      throw badRequest("Connection profile entries require connectionId");
-    }
-    if (input.selectorType === "catalog_entry" && !input.catalogEntryId) {
-      throw badRequest("Catalog-entry profile entries require catalogEntryId");
-    }
-    if (input.selectorType === "tool_name" && !input.toolName) {
-      throw badRequest("Tool-name profile entries require toolName");
-    }
-    if (input.selectorType === "risk_level" && !input.riskLevel) {
-      throw badRequest("Risk-level profile entries require riskLevel");
-    }
+    assertProfileEntryShape(input);
     if (input.applicationId)
       await assertApplication(companyId, input.applicationId);
     if (input.connectionId)
@@ -6237,9 +6224,7 @@ export function toolAccessService(
     profileId: string,
     entries: CreateToolProfileEntryForProfile[],
   ) {
-    for (const entry of entries) {
-      await assertProfileEntryInput(companyId, entry);
-    }
+    await assertProfileEntryInputs(db, companyId, entries);
     if (entries.length === 0) return;
     await db.insert(toolProfileEntries).values(
       entries.map((entry) => ({
@@ -6262,9 +6247,7 @@ export function toolAccessService(
     profileId: string,
     entries: CreateToolProfileEntryForProfile[],
   ) {
-    for (const entry of entries) {
-      await assertProfileEntryInput(companyId, entry);
-    }
+    await assertProfileEntryInputs(db, companyId, entries);
     await db
       .delete(toolProfileEntries)
       .where(
@@ -19613,9 +19596,7 @@ export function toolAccessService(
       companyId: string,
       input: CreateToolProfileWithEntries,
     ): Promise<ToolProfileWithDetails> => {
-      for (const entry of input.entries ?? []) {
-        await assertProfileEntryInput(companyId, entry);
-      }
+      await assertProfileEntryInputs(db, companyId, input.entries ?? []);
       const [row] = await db
         .insert(toolProfiles)
         .values({
@@ -19644,9 +19625,7 @@ export function toolAccessService(
     ): Promise<ToolProfileWithDetails> => {
       const existing = await getProfileRow(profileId);
       if (input.entries) {
-        for (const entry of input.entries) {
-          await assertProfileEntryInput(existing.companyId, entry);
-        }
+        await assertProfileEntryInputs(db, existing.companyId, input.entries);
       }
       await db
         .update(toolProfiles)

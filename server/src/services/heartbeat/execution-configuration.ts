@@ -1,5 +1,4 @@
 import { withSkillActor } from "../skill-access.js";
-import { withSkillVersionCacheLock } from "../skill-version-cache.js";
 import type { AuthorizationActor } from "../authorization.js";
 import { eq, sql } from "drizzle-orm";
 import { heartbeatRuns, type Db, type agents, type projects } from "@paperclipai/db";
@@ -40,6 +39,14 @@ const ACCEPTED_PLAN_CONVERSION_SKILL_KEY =
 type ManagedAiRuntime = Awaited<ReturnType<typeof prepareManagedAiRuntime>>;
 type EnvironmentSelection = Awaited<ReturnType<typeof selectHeartbeatEnvironment>>;
 
+/** Preparation and routing must use the same immutable mode as native recovery. */
+export function bindHeartbeatRunnerHomeMode(config: Record<string, unknown>, persistedExecution: unknown): Record<string, unknown> {
+  const saved = parseObject(persistedExecution);
+  if (Object.keys(saved).length === 0) return config;
+  // Execution schemas before v7 always used isolated homes.
+  return { ...config, homeMode: saved.homeMode ?? "isolated" };
+}
+
 export interface HeartbeatExecutionConfigurationInput {
   run: typeof heartbeatRuns.$inferSelect;
   agent: typeof agents.$inferSelect;
@@ -62,7 +69,7 @@ export interface HeartbeatExecutionConfigurationInput {
     "selectedEnvironmentId" | "selectedEnvironmentForConfig" | "resolvedInstanceSettings" | "persistedNativeExecutionInput">;
   services: {
     secretsSvc: Parameters<typeof resolveExecutionRunAdapterConfig>[0]["secretsSvc"];
-    companySkills: Pick<ReturnType<typeof companySkillService>, "listRuntimeSkillEntries">;
+    companySkills: Pick<ReturnType<typeof companySkillService>, "withRuntimeSkillEntries">;
     appendRunEvent: ReturnType<typeof createHeartbeatLifecycle>["appendRunEvent"];
     finalizeAiConnectionBusyDeferral: ReturnType<typeof createHeartbeatRetries>["finalizeAiConnectionBusyDeferral"];
   };
@@ -77,9 +84,14 @@ export async function prepareHeartbeatExecutionConfiguration(db: Db, input: Hear
   const { run, agent, onFailureSecretsResolved, onManagedAiRuntimeAcquired, onIdentityRedactorPrepared } = input;
   const time = createHeartbeatPreparationTiming(run.id);
   const { issueId, context, responsibleUserId, acceptedPlanContinuationWake, acceptedPlanWakeRoutingDecision, taskProjectContext, routineEnvContext } = input.task;
-  const { sourceWorkspaceConfig, aiBinding } = input.config;
-  const { trustPreset, useIsolatedTaskDirectory, explicitTaskDirectory } = input.policy;
   const { selectedEnvironmentId, selectedEnvironmentForConfig, resolvedInstanceSettings, persistedNativeExecutionInput } = input.environment;
+  const sourceWorkspaceConfig = agent.adapterType === "paperclip_runner"
+    ? { ...input.config.sourceWorkspaceConfig,
+        homeMode: bindHeartbeatRunnerHomeMode(parseObject(agent.adapterConfig), persistedNativeExecutionInput).homeMode }
+    : input.config.sourceWorkspaceConfig;
+  const preconfiguredHome = agent.adapterType === "paperclip_runner" && sourceWorkspaceConfig.homeMode === "preconfigured";
+  const aiBinding = preconfiguredHome ? undefined : input.config.aiBinding;
+  const { trustPreset, useIsolatedTaskDirectory, explicitTaskDirectory } = input.policy;
   const { secretsSvc, companySkills, appendRunEvent, finalizeAiConnectionBusyDeferral } = input.services;
   let managedAiRuntime: ManagedAiRuntime | undefined;
   const mergedConfig = {
@@ -97,7 +109,7 @@ export async function prepareHeartbeatExecutionConfiguration(db: Db, input: Hear
   const skillActor: AuthorizationActor = { type: "agent", agentId: agent.id, companyId: agent.companyId,
     runId: run.id, source: "agent_jwt", onBehalfOfUserId: responsibleUserId === "local-board" ? null : responsibleUserId };
   const runScopedMentionedSkillKeys =
-    await time("configuration_mentions", () => resolveRunScopedMentionedSkillKeys({
+    preconfiguredHome ? [] : await time("configuration_mentions", () => resolveRunScopedMentionedSkillKeys({
       db,
       companyId: agent.companyId,
       issueId,
@@ -211,50 +223,49 @@ export async function prepareHeartbeatExecutionConfiguration(db: Db, input: Hear
   let skillDeliveryConfig = effectiveResolvedConfig;
   const storedVersions = parseObject(run.contextSnapshot?.skillVersions);
   const hasStoredVersions = Object.prototype.hasOwnProperty.call(run.contextSnapshot ?? {}, "skillVersions");
-  const emptySkillSelection = hasStoredVersions
-    ? run.contextSnapshot?.skillSelectionSnapshot === true && Object.keys(storedVersions).length === 0
-    : agent.adapterType === "paperclip_runner" && runtimeSkillPreference.desiredSkills.length === 0;
   const prepareSkills = async () => {
+
     try {
       const versionSelections = hasStoredVersions
         ? new Map(Object.entries(storedVersions).filter((entry): entry is [string, string | null] => entry[1] === null || typeof entry[1] === "string"))
         : skillVersionSelectionMap(runtimeSkillPreference.desiredSkillEntries, {
           versionPinsEnabled: resolvedInstanceSettings.experimental.enableBetaSkills === true,
         });
-      const entries = await withSkillActor(skillActor, () => companySkills.listRuntimeSkillEntries(agent.companyId, {
+      return await withSkillActor(skillActor, () => companySkills.withRuntimeSkillEntries(agent.companyId, {
         versionSelections, snapshotLatest: true,
         ...(hasStoredVersions && run.contextSnapshot?.skillSelectionSnapshot === true
           ? { onlyKeys: new Set(Object.keys(storedVersions)) }
           : { selectionConfig: effectiveResolvedConfig, includeLegacy: agent.adapterType !== "paperclip_runner" }),
-      }));
-      const available = hasStoredVersions ? entries.filter(entry => Object.prototype.hasOwnProperty.call(storedVersions, entry.key)) : entries;
-      const availableKeys = new Set(available.map(entry => entry.key));
-      const desiredKeys = hasStoredVersions && run.contextSnapshot?.skillSelectionSnapshot === true
-        ? Object.keys(storedVersions)
-        : agent.adapterType === "paperclip_runner"
-          ? resolvePaperclipDesiredSkillNames(effectiveResolvedConfig, available)
-          : resolveLegacyPaperclipDesiredSkillNames(effectiveResolvedConfig, available);
-      const selectedKeys = new Set(desiredKeys.filter(key => availableKeys.has(key)));
-      const resolved = available.filter(entry => selectedKeys.has(entry.key));
-      // Optional assignments can outlive project membership. Drop inaccessible
-      // assignments from delivery; explicit task mentions remain errors below.
-      skillDeliveryConfig = writePaperclipSkillSyncPreference(effectiveResolvedConfig,
-        resolved.map(entry => ({ key: entry.key, versionId: entry.versionId ?? null })));
-      for (const key of runScopedMentionedSkillKeys) {
-        const entry = resolved.find(candidate => candidate.key === key);
-        if (!entry || entry.sourceStatus === "missing") {
-          throw new ConfigurationIncompleteFailure("A referenced skill is unavailable. Restore its installed version or update the task's skill reference.", {
-            configurationIncomplete: { reason: "skill_unavailable", skillKey: key, actionUrl: "/skills" },
-          });
+      }, async entries => {
+        const available = hasStoredVersions ? entries.filter(entry => Object.prototype.hasOwnProperty.call(storedVersions, entry.key)) : entries;
+        const availableKeys = new Set(available.map(entry => entry.key));
+        const desiredKeys = hasStoredVersions && run.contextSnapshot?.skillSelectionSnapshot === true
+          ? Object.keys(storedVersions)
+          : agent.adapterType === "paperclip_runner"
+            ? resolvePaperclipDesiredSkillNames(effectiveResolvedConfig, available)
+            : resolveLegacyPaperclipDesiredSkillNames(effectiveResolvedConfig, available);
+        const selectedKeys = new Set(desiredKeys.filter(key => availableKeys.has(key)));
+        const resolved = available.filter(entry => selectedKeys.has(entry.key));
+        // Optional assignments can outlive project membership. Drop inaccessible
+        // assignments from delivery; explicit task mentions remain errors below.
+        skillDeliveryConfig = writePaperclipSkillSyncPreference(effectiveResolvedConfig,
+          resolved.map(entry => ({ key: entry.key, versionId: entry.versionId ?? null })));
+        for (const key of runScopedMentionedSkillKeys) {
+          const entry = resolved.find(candidate => candidate.key === key);
+          if (!entry || entry.sourceStatus === "missing") {
+            throw new ConfigurationIncompleteFailure("A referenced skill is unavailable. Restore its installed version or update the task's skill reference.", {
+              configurationIncomplete: { reason: "skill_unavailable", skillKey: key, actionUrl: "/skills" },
+            });
+          }
         }
-      }
-      if (!hasStoredVersions) {
-        const skillVersions = Object.fromEntries(resolved.map(entry => [entry.key, entry.versionId ?? entry.currentVersionId ?? null]));
-        context.skillVersions = skillVersions;
-        context.skillSelectionSnapshot = true;
-        await db.update(heartbeatRuns).set({ contextSnapshot: sql`coalesce(${heartbeatRuns.contextSnapshot}, '{}'::jsonb) || ${JSON.stringify({ skillVersions, skillSelectionSnapshot: true })}::jsonb` }).where(eq(heartbeatRuns.id, run.id));
-      }
-      return resolved;
+        if (!hasStoredVersions) {
+          const skillVersions = Object.fromEntries(resolved.map(entry => [entry.key, entry.versionId ?? entry.currentVersionId ?? null]));
+          context.skillVersions = skillVersions;
+          context.skillSelectionSnapshot = true;
+          await db.update(heartbeatRuns).set({ contextSnapshot: sql`coalesce(${heartbeatRuns.contextSnapshot}, '{}'::jsonb) || ${JSON.stringify({ skillVersions, skillSelectionSnapshot: true })}::jsonb` }).where(eq(heartbeatRuns.id, run.id));
+        }
+        return resolved;
+      }));
     } catch (error) {
       if (agent.adapterType === "paperclip_runner") {
         await recordFailedSkillPreparation({
@@ -268,16 +279,14 @@ export async function prepareHeartbeatExecutionConfiguration(db: Db, input: Hear
       throw error;
     }
   };
-  const runtimeSkillEntries = await time("configuration_skills", () => emptySkillSelection
-    ? prepareSkills()
-    : withSkillVersionCacheLock(db, agent.companyId, prepareSkills));
+  const runtimeSkillEntries = preconfiguredHome ? [] : await time("configuration_skills", prepareSkills);
   nativeRunnerPreparationSpans.push({
     name: "skills.prepare",
     parentName: "task.prepare",
     startedAtMs: skillsPrepareStartedAtMs,
     endedAtMs: Date.now(),
   });
-  const connectorAssignments = await time("configuration_connector_assignments", () => resolveConnectorAssignments(db, { companyId: agent.companyId, agentId: agent.id, runId: run.id, issueId: typeof context.issueId === "string" ? context.issueId : undefined }));
+  const connectorAssignments = preconfiguredHome ? [] : await time("configuration_connector_assignments", () => resolveConnectorAssignments(db, { companyId: agent.companyId, agentId: agent.id, runId: run.id, issueId: typeof context.issueId === "string" ? context.issueId : undefined }));
   const connectorSkillConfig = await time("configuration_connector_skills", () => applyConnectorSkills(skillDeliveryConfig, runtimeSkillEntries, connectorAssignments));
   // Both CLI adapters and native context materialization use the same resolved set.
   runtimeSkillEntries.splice(0, runtimeSkillEntries.length, ...connectorSkillConfig.paperclipRuntimeSkills);

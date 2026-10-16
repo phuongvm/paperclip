@@ -2958,6 +2958,7 @@ describe("Daytona sandbox provider plugin", () => {
         process.env.DAYTONA_API_KEY = "host-key";
         const sandbox = createStreamingSandbox();
         let streams = 0;
+        let exited = false;
         sandbox.process.getSessionCommandLogs.mockImplementation(
           async (_sid: string, _cmdId: string, onStdout?: (chunk: string) => void, onStderr?: (chunk: string) => void) => {
             if (!onStdout) return { stdout: "first;last;", stderr: "" };
@@ -2965,10 +2966,10 @@ describe("Daytona sandbox provider plugin", () => {
             onStdout("first;");
             await streamFor(3_600_000, onStderr);
             if (streams === 1 && ending === "reject") throw new Error("socket error");
-            if (streams === 2) onStdout("last;");
+            if (streams === 2) { onStdout("last;"); exited = true; }
           },
         );
-        sandbox.process.getSessionCommand.mockImplementation(async () => ({ exitCode: streams === 2 ? 7 : undefined }));
+        sandbox.process.getSessionCommand.mockImplementation(async () => ({ exitCode: exited ? 7 : undefined }));
         mockGet.mockResolvedValue(sandbox);
         vi.useFakeTimers();
         try {

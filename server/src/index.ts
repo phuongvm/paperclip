@@ -7,6 +7,7 @@ import {
 } from "./services/skill-version-retention.js";
 import { subscribeAllCompanyLiveEvents } from "./services/live-events.js";
 import { DELIVERY_QUEUES } from "./services/delivery-work-notifications.js";
+import { registerScheduledWork } from "./services/scheduled-work.js";
 import type { createDeliveryWorkCoordinator } from "./services/delivery-work-coordinator.js";
 import { registerTerminalWorkspaceWork, TERMINAL_WORKSPACE_RETRY_MS } from "./services/terminal-workspace-work.js";
 import { isIdleTaskDrainActive, beginIdleTrackedWork, trackIdleWork } from "./services/task-admission.js";
@@ -1718,7 +1719,7 @@ async function startServerWithDatabaseTeardown(
       await step("retention_sweep", runRetentionSweep);
     };
 
-    const startHeartbeatScheduler = () => startHeartbeatSchedulerInterval(() => {
+    const createHeartbeatSchedulerTick = (scheduled: ReturnType<typeof registerScheduledWork>) => () => {
       // Track the outer async callback as well as the work it starts. Shutdown
       // can then wait through an already-running suppression check before it
       // captures the authoritative set of running heartbeat rows.
@@ -1738,18 +1739,7 @@ async function startServerWithDatabaseTeardown(
           );
         }
 
-        if (!(await heartbeat.resolveSchedulingSuppression()).suppressed) {
-          trackHeartbeatSchedulerWork(heartbeat
-            .tickTimers(new Date())
-            .then((result) => {
-              if (result.enqueued > 0) {
-                logger.info({ ...result }, "heartbeat timer tick enqueued runs");
-              }
-            })
-            .catch((err) => {
-              logger.error({ err }, "heartbeat timer tick failed");
-            }));
-        }
+        scheduled.timers.wake();
 
         if (isIdleTaskDrainActive() || heartbeatSchedulerStopped) return;
         scheduleExternalObjectRefreshSweep(new Date());
@@ -1763,16 +1753,7 @@ async function startServerWithDatabaseTeardown(
         scheduleEnvironmentLeaseCleanupSweep();
 
         if (isIdleTaskDrainActive() || heartbeatSchedulerStopped) return;
-        trackHeartbeatSchedulerWork(routines
-          .tickScheduledTriggers(new Date())
-          .then((result) => {
-            if (result.triggered > 0) {
-              logger.info({ ...result }, "routine scheduler tick enqueued runs");
-            }
-          })
-          .catch((err) => {
-            logger.error({ err }, "routine scheduler tick failed");
-          }));
+        scheduled.routines.wake();
 
         if (isIdleTaskDrainActive() || heartbeatSchedulerStopped) return;
         trackHeartbeatSchedulerWork((async () => {
@@ -1896,7 +1877,22 @@ async function startServerWithDatabaseTeardown(
       })().catch((err) => {
         logger.error({ err }, "heartbeat scheduler tick failed");
       }));
-    });
+    };
+    const startHeartbeatScheduler = () => {
+      const scheduled = registerScheduledWork(deliveryWork, db, {
+        retryMs: config.heartbeatSchedulerIntervalMs,
+        tickTimers: async () => {
+          if ((await heartbeat.resolveSchedulingSuppression()).suppressed) return;
+          const result = await heartbeat.tickTimers(new Date());
+          if (result.enqueued > 0) logger.info({ ...result }, "heartbeat timer tick enqueued runs");
+        },
+        tickRoutines: () => routines.tickScheduledTriggers(new Date()).then(result => {
+          if (result.triggered > 0) logger.info({ ...result }, "routine scheduler tick enqueued runs");
+        }),
+      });
+      trackHeartbeatSchedulerWork(Promise.all([scheduled.timers.ready, scheduled.routines.ready]));
+      startHeartbeatSchedulerInterval(createHeartbeatSchedulerTick(scheduled));
+    };
     trackHeartbeatSchedulerWork(runStartupHousekeeping().then(() => {
       if (!heartbeatSchedulerStopped) startHeartbeatScheduler();
     }));

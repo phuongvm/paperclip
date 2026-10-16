@@ -35,9 +35,9 @@ export function createDeliveryWorkCoordinator(input: {
       let workerStopped = false;
       let controller: AbortController | null = null;
       let finishIntent: (() => void) | undefined;
-      function schedule(delay: number) {
+      function schedule(delay: number, deadline?: number) {
         if (workerStopped) return;
-        const at = Date.now() + delay;
+        const at = deadline ?? Date.now() + delay;
         if (scheduledAt !== null && scheduledAt <= at) return;
         scheduledAt = at;
         scheduler.schedule(queue, at, start);
@@ -56,7 +56,10 @@ export function createDeliveryWorkCoordinator(input: {
           if (pending || databaseWorkPending(input.owner, queue)) schedule(task.retryMs);
           else { finishIntent?.(); finishIntent = undefined; }
           const next = task.nextRunAt?.();
-          if (next != null) schedule(Math.max(0, next - Date.now()));
+          if (next != null) {
+            const delay = Math.max(0, next - Date.now());
+            schedule(delay === 0 && !input.canRun() ? task.retryMs : delay, delay > 0 ? next : undefined);
+          }
         }).catch(error => {
           schedule(task.retryMs);
           // Logging must never turn a recoverable sweep failure into an

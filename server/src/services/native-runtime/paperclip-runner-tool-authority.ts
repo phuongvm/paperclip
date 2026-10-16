@@ -1,3 +1,4 @@
+import { DELIVERY_QUEUES, notifyDeliveryWork } from "../delivery-work-notifications.js";
 import { skillAccessService } from "../skill-access.js";
 import { callTaskWorkspaceTool } from "../task-workspace-tools.js";
 import { TaskAttachmentReadCache, TASK_ATTACHMENT_DEFINITIONS, TASK_ATTACHMENT_SCHEMAS, listTaskAttachments, readTaskAttachment } from "./runner-task-attachments.js";
@@ -9,7 +10,7 @@ import { isConversation } from "../agent-conversations.js";
 import { setIssueTitle } from "../issue-title.js";
 import { externalObjectService } from "../external-objects.js";
 import { instanceSettingsService } from "../instance-settings.js";
-import { setIssueTitleSchema } from "@paperclipai/shared";
+import { fastResponseHistoryBody, setIssueTitleSchema } from "@paperclipai/shared";
 import { authorizeInstructionCommit } from "../agent-instruction-authorization.js";
 import { executeAgentInstructionTool } from "./agent-instruction-tools.js";
 import { createReadStream } from "node:fs";
@@ -624,6 +625,7 @@ export class PaperclipRunnerToolAuthority {
         const comments = await this.db.select({
           id: issueComments.id,
           body: issueComments.body,
+          origin: issueComments.origin,
           authorAgentId: issueComments.authorAgentId,
           authorUserId: issueComments.authorUserId,
           createdAt: issueComments.createdAt,
@@ -635,7 +637,7 @@ export class PaperclipRunnerToolAuthority {
           ))
           .orderBy(desc(issueComments.createdAt))
           .limit(limit);
-        return { comments: comments.reverse() };
+        return { comments: comments.reverse().map(comment => ({ ...comment, body: fastResponseHistoryBody(comment) })) };
       }
       case "search_tasks": {
         const tasks = await issueService(this.db).list(this.binding.companyId, { readCondition: await issueReadSqlCondition(this.db, this.#privacyActor(context.run)) });
@@ -1647,6 +1649,7 @@ export class PaperclipRunnerToolAuthority {
         return { taskId: target.id, status: target.status, monitor: replayMonitor };
       }
       const patch = prepareIssueMonitorUpdate(target, input.monitor, actor);
+      await notifyDeliveryWork(tx, DELIVERY_QUEUES.issueMonitors);
       const [updated] = await tx.update(issues).set({ ...patch, updatedAt: new Date() })
         .where(and(eq(issues.id, target.id), eq(issues.companyId, this.binding.companyId))).returning();
       if (!updated) throw notFound("Task not found");

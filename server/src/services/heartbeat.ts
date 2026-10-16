@@ -3,7 +3,7 @@ import { withRunExecutionTiming, measureRunPhase, measureWorkspaceSyncPhase, isW
 import { createHeartbeatPreparationTiming } from "./heartbeat/preparation-timing.js";
 import { createHeartbeatInstructionCopyRelease, createHeartbeatInstructionWorkingCopy } from "./heartbeat/instruction-working-copy.js";
 import { prepareHeartbeatRuntimeServiceIntents, startHeartbeatRuntimeServices, recordHeartbeatAdapterRuntimeServices } from "./heartbeat/runtime-services.js";
-import { prepareHeartbeatExecutionConfiguration } from "./heartbeat/execution-configuration.js";
+import { bindHeartbeatRunnerHomeMode, prepareHeartbeatExecutionConfiguration } from "./heartbeat/execution-configuration.js";
 import { createHeartbeatRunOutput } from "./heartbeat/run-output.js";
 import { prepareHeartbeatSession, resolveHeartbeatAdapterSession } from "./heartbeat/session-preparation.js";
 import { prepareHeartbeatTaskContext } from "./heartbeat/task-context.js";
@@ -2486,9 +2486,15 @@ export function heartbeatService(
             taskKey,
           )
         : null;
-      const routerHasPersistedInput = Object.keys(parseObject(parseObject(run.runnerProfileJson).nativeExecutionInput)).length > 0;
+      const savedRouterInput = parseObject(parseObject(run.runnerProfileJson).nativeExecutionInput);
+      const routerHasPersistedInput = Object.keys(savedRouterInput).length > 0;
+      if (agent.adapterType === "paperclip_runner") {
+        const homeConfig = bindHeartbeatRunnerHomeMode(config, savedRouterInput);
+        if ("homeMode" in homeConfig) config = { ...config, homeMode: homeConfig.homeMode };
+      }
       const persistedRouterPoolId = routerHasPersistedInput ? readNonEmptyString(parseObject(context.aiRouterSelection).poolId) : null;
-      const requestedAiBinding = persistedRouterPoolId ? { mode: "router" as const, connectionId: persistedRouterPoolId } : agent.runtimeConfig?.aiConnection ? aiRuntimeConnectionBindingSchema.parse(agent.runtimeConfig.aiConnection) : undefined;
+      const preconfiguredHome = agent.adapterType === "paperclip_runner" && config.homeMode === "preconfigured";
+      const requestedAiBinding = preconfiguredHome ? undefined : persistedRouterPoolId ? { mode: "router" as const, connectionId: persistedRouterPoolId } : agent.runtimeConfig?.aiConnection ? aiRuntimeConnectionBindingSchema.parse(agent.runtimeConfig.aiConnection) : undefined;
       let aiBinding = requestedAiBinding?.mode === "router" ? undefined : requestedAiBinding;
       const originalAiIssueOverrides = issueAssigneeOverrides;
       if (requestedAiBinding?.mode === "router") {
@@ -2870,8 +2876,9 @@ export function heartbeatService(
       ) => {
         // Admission can wait for accounting locks. Finish that wait before the
         // final ownership gate, whose callback must enter the adapter directly.
-        const reservation = await reserveRunBudget(db, run.companyId, run.id,
-          readNonEmptyString(runLedgerScope.projectId), runLedgerScope, runOptions.nativeLeaseOwner);
+        const reservation = await measureRunPhase("execution.budget_reservation", () =>
+          reserveRunBudget(db, run.companyId, run.id,
+            readNonEmptyString(runLedgerScope.projectId), runLedgerScope, runOptions.nativeLeaseOwner));
         let entered = false;
         try {
           return await dispatchResolvedInteractionContinuationAfterAdmission((markDispatchStarted) => {

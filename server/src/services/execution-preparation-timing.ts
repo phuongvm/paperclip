@@ -43,6 +43,7 @@ export type ExecutionPhase =
   | "workspace.materialize.directories" | "workspace.materialize.source_identity"
   | "workspace.checkout.lookup" | "workspace.checkout.git_auth" | "workspace.checkout.git_clone"
   | "workspace.checkout.git_ref" | "workspace.checkout.publish"
+  | "workspace.checkout.cache_lookup" | "workspace.checkout.cache_publish"
   | "runtime_selection.review" | "runtime_selection.contract_read" | "runtime_selection.contract_ensure"
   | "runtime_selection.resume" | "runtime_selection.recovery_profile" | "runtime_selection.profile" | "runtime_selection.interactions"
   | "runtime_selection.provider_discovery" | "runtime_selection.bootstrap" | "runtime_selection.run_write" | "runtime_selection.finalization_write"
@@ -74,6 +75,7 @@ export type ExecutionPhase =
   | "execution.runtime" | "execution.workspace_ownership" | "execution.workspace_finalize" | "execution.workspace_restore" | "execution.workspace_commit"
   | "execution.workspace_ownership_wait" | "execution.realtime"
   | "execution.usage" | "execution.native_finalize"
+  | "execution.usage_startup" | "execution.mcp_handoff" | "execution.dispatch_admission" | "execution.budget_reservation"
   | "completion.run" | "completion.output" | "completion.terminal_write" | "completion.cost" | "completion.liveness" | "completion.summary"
   | "response.transaction" | "response.transaction.entry" | "response.transaction.commit" | "response.transaction.rollback" | "response.row_lock" | "response.write"
   | "response.resolve" | "response.authorize" | "response.add_comment" | "response.activity" | "response.publish";

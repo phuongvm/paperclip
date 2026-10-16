@@ -22,6 +22,7 @@ import {
 } from "../services/issue-prefix.js";
 import { verifyLocalAgentJwt } from "../agent-auth-jwt.js";
 import { agentRunWritesRevoked } from "../agent-run-cancellation.js";
+import { loadAgentRunAuthentication } from "./agent-run-authentication.js";
 import { isUuidLike, normalizeAgentApiKeyScope, type DeploymentMode } from "@paperclipai/shared";
 import type { BetterAuthSessionResult } from "../auth/better-auth.js";
 import { logger } from "./logger.js";
@@ -166,6 +167,18 @@ async function auditAgentJwtRunHeaderMismatch(
   input: { companyId: string; agentId: string; claimRunId: string; headerRunId: string; method: string; url: string },
 ) {
   try {
+    // The claimed run id is untrusted input from a rejected token. activity_log
+    // .run_id is a real FK to heartbeat_runs, so writing it unconditionally
+    // makes the insert fail — and the catch swallows it — exactly when the
+    // claim is bogus. Keep the claim in entityId/details and populate the FK
+    // column only when the row actually exists.
+    const claimedRunExists = isUuidLike(input.claimRunId)
+      ? await db
+          .select({ id: heartbeatRuns.id })
+          .from(heartbeatRuns)
+          .where(eq(heartbeatRuns.id, input.claimRunId))
+          .then((rows) => rows.length > 0)
+      : false;
     await db.insert(activityLog).values({
       companyId: input.companyId,
       actorType: "agent",
@@ -174,7 +187,7 @@ async function auditAgentJwtRunHeaderMismatch(
       entityType: "heartbeat_run",
       entityId: input.claimRunId,
       ...(isUuidLike(input.agentId) ? { agentId: input.agentId } : {}),
-      ...(isUuidLike(input.claimRunId) ? { runId: input.claimRunId } : {}),
+      ...(claimedRunExists ? { runId: input.claimRunId } : {}),
       details: {
         claimRunId: input.claimRunId,
         headerRunId: input.headerRunId,
@@ -399,11 +412,11 @@ export function actorMiddleware(db: Db, opts: ActorMiddlewareOptions): RequestHa
         return;
       }
 
-      const [identityRun] = await db.select({ activeIdentityContextId: heartbeatRuns.activeIdentityContextId,
-        responsibleUserId: heartbeatRuns.responsibleUserId, status: heartbeatRuns.status, resultJson: heartbeatRuns.resultJson,
-        contextSnapshot: heartbeatRuns.contextSnapshot }).from(heartbeatRuns).where(and(
-          eq(heartbeatRuns.id, claims.run_id), eq(heartbeatRuns.companyId, claims.company_id), eq(heartbeatRuns.agentId, claims.sub),
-        ));
+      const [identityRun] = await loadAgentRunAuthentication(db, {
+        runId: claims.run_id,
+        companyId: claims.company_id,
+        agentId: claims.sub,
+      });
       if (agentRunWritesRevoked(identityRun)
         && !["GET", "HEAD", "OPTIONS"].includes(req.method)) {
         const conversation = identityRun?.contextSnapshot?.conversationMode === true;

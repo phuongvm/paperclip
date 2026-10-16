@@ -2,20 +2,21 @@ import { enableRunFailureReporting } from "./helpers/run-failure-reporting.js";
 import { createHash, randomUUID } from "node:crypto";
 import { trace } from "@opentelemetry/api";
 import { InMemorySpanExporter, SimpleSpanProcessor, TracerProvider } from "@opentelemetry/sdk-trace";
-import { access, readFile, mkdtemp, rm } from "node:fs/promises";
+import { access, chmod, mkdir, readdir, readFile, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { eq } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { agents, companies, companyMemberships, companySkills, createDb, heartbeatRunEvents, heartbeatRuns, issues, projects } from "@paperclipai/db";
 import { companySkillService } from "../services/company-skills.js";
-import { secretService } from "../services/secrets.js";
-import { instanceSettingsService } from "../services/instance-settings.js";
 import { withSkillVersionCacheLock } from "../services/skill-version-cache.js";
-import { prepareHeartbeatExecutionConfiguration } from "../services/heartbeat/execution-configuration.js";
 import { registerServerAdapter, unregisterServerAdapter, type AdapterExecutionContext } from "../adapters/index.js";
 import { HttpError } from "../errors.js";
 import { heartbeatService } from "../services/heartbeat.js";
+import { bindHeartbeatRunnerHomeMode, prepareHeartbeatExecutionConfiguration, type HeartbeatExecutionConfigurationInput } from "../services/heartbeat/execution-configuration.js";
+import { aiRuntimeConnectionBindingSchema } from "@paperclipai/shared";
+import { secretService } from "../services/secrets.js";
+import { instanceSettingsService } from "../services/instance-settings.js";
 import { aiConnectionService } from "../services/ai-connections.js";
 import * as aiRuntime from "../services/ai-connection-runtime.js";
 import * as sentry from "../sentry.js";
@@ -23,14 +24,37 @@ import { waitForPendingRunFailureReports } from "../services/run-failure-report.
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 
 const skillFailures = vi.hoisted(() => new Map<string, string>());
+
+describe("Runner home mode during recovery preparation", () => {
+  it.each([
+    ["preconfigured", { schema: "paperclip.native-execution-input.v5" }, "isolated"],
+    ["preconfigured", { schema: "paperclip.native-execution-input.v7", homeMode: "isolated" }, "isolated"],
+    ["isolated", { schema: "paperclip.native-execution-input.v7", homeMode: "preconfigured" }, "preconfigured"],
+  ])("prepares the saved mode after current configuration changes to %s", (current, saved, expected) => {
+    const config = { homeMode: current, model: "current-model", env: { TASK_VALUE: "kept" } };
+    // Called before router selection and again after mutable task overrides.
+    const routed = bindHeartbeatRunnerHomeMode(config, saved);
+    const prepared = bindHeartbeatRunnerHomeMode({ ...routed, homeMode: current }, saved);
+    expect(prepared).toEqual({ ...config, homeMode: expected });
+    expect(config.homeMode).toBe(current);
+  });
+
+  it.each(["isolated", "preconfigured", undefined])("uses current mode %s for a new run", homeMode => {
+    const config = { homeMode };
+    expect(bindHeartbeatRunnerHomeMode(config, null)).toBe(config);
+    expect(bindHeartbeatRunnerHomeMode(config, {})).toBe(config);
+  });
+});
 vi.mock("../services/company-skills.js", async importOriginal => {
   const actual = await importOriginal<typeof import("../services/company-skills.js")>();
   return { ...actual, companySkillService: (...args: Parameters<typeof actual.companySkillService>) => {
     const service = actual.companySkillService(...args);
-    return { ...service, listRuntimeSkillEntries: async (...input: Parameters<typeof service.listRuntimeSkillEntries>) => {
-      const failure = skillFailures.get(input[0]);
+    return { ...service, withRuntimeSkillEntries: async <T>(companyId: string,
+      options: Parameters<typeof service.withRuntimeSkillEntries>[1],
+      consume: (entries: Awaited<ReturnType<typeof service.listRuntimeSkillEntries>>) => T | Promise<T>) => {
+      const failure = skillFailures.get(companyId);
       if (failure) throw new Error(failure);
-      return service.listRuntimeSkillEntries(...input);
+      return service.withRuntimeSkillEntries(companyId, options, consume);
     } };
   } };
 });
@@ -92,7 +116,7 @@ describePostgres("heartbeat execution configuration through adapter dispatch", (
       runtimeConfig: account ? { aiConnection: { provider: "openai", method: "api_key", mode: "delegated", connectionId: account.connectionId, grantId: account.grantId } } : {},
     });
     await db.insert(issues).values({ id: issueId, companyId, projectId, title: "Configuration fixture", status: "todo", assigneeAgentId: agentId, responsibleUserId: userId, issueNumber: 1, assigneeAdapterOverrides: { adapterConfig: { model: "issue-model" } } });
-    return { companyId, agentId, issueId, credential };
+    return { companyId, agentId, issueId, userId, credential };
   }
 
   async function execute(f: Awaited<ReturnType<typeof seed>>) {
@@ -106,6 +130,89 @@ describePostgres("heartbeat execution configuration through adapter dispatch", (
     expect(finished).toBeDefined();
     return { finished, input: captured.get(run!.id) };
   }
+
+  it.each([
+    { saved: "isolated", managed: true, failure: "saved managed login required" },
+    { saved: "isolated", managed: false, failure: "saved isolated skills required" },
+    { saved: "preconfigured", managed: true, failure: null },
+    { saved: null, managed: true, failure: "saved managed login required" },
+  ] as const)("retains $saved preparation after configuration changes (managed: $managed)", async ({ saved, managed, failure }) => {
+    const f = await seed(managed);
+    const [agent] = await db.update(agents).set({ adapterType: "paperclip_runner", adapterConfig: {
+      provider: "codex", model: "gpt-6.1-sol", homeMode: saved === "isolated" ? "preconfigured" : "isolated",
+    } }).where(eq(agents.id, f.agentId)).returning();
+    const [run] = await db.insert(heartbeatRuns).values({ companyId: f.companyId, agentId: f.agentId,
+      status: "running", runtimeMode: "native", contextSnapshot: { issueId: f.issueId },
+    }).returning();
+    const prepare = vi.spyOn(aiRuntime, "prepareManagedAiRuntime").mockRejectedValue(new Error("saved managed login required"));
+    skillFailures.set(f.companyId, "saved isolated skills required");
+    // Preparation only reads the persisted mode and whether recovery is active.
+    const persisted = saved === null ? null : { schema: saved === "isolated" ? "paperclip.native-execution-input.v5" : "paperclip.native-execution-input.v7",
+      ...(saved === "preconfigured" ? { homeMode: saved } : {}),
+    } as unknown as HeartbeatExecutionConfigurationInput["environment"]["persistedNativeExecutionInput"];
+    const opening = prepareHeartbeatExecutionConfiguration(db, {
+      run, agent, task: { issueId: f.issueId, context: {}, responsibleUserId: f.userId,
+        acceptedPlanContinuationWake: false, acceptedPlanWakeRoutingDecision: null, taskProjectContext: null,
+        routineEnvContext: { routineId: null, env: null, responsibleUserId: null } },
+      config: { sourceWorkspaceConfig: { ...agent.adapterConfig, homeMode: "preconfigured" }, aiBinding: managed
+        ? aiRuntimeConnectionBindingSchema.parse(agent.runtimeConfig!.aiConnection) : undefined },
+      policy: { trustPreset: { kind: "standard", preset: "standard", boundary: null, sourcePresets: {} },
+        useIsolatedTaskDirectory: false, explicitTaskDirectory: false },
+      environment: { selectedEnvironmentId: null, selectedEnvironmentForConfig: null,
+        resolvedInstanceSettings: await instanceSettingsService(db).get(), persistedNativeExecutionInput: persisted },
+      services: { secretsSvc: secretService(db), companySkills: companySkillService(db), appendRunEvent: vi.fn(), finalizeAiConnectionBusyDeferral: vi.fn() },
+      onFailureSecretsResolved: vi.fn(), onManagedAiRuntimeAcquired: vi.fn(), onIdentityRedactorPrepared: vi.fn(),
+    });
+    if (failure) await expect(opening).rejects.toThrow(failure);
+    else {
+      expect(await opening).toMatchObject({ prepared: true, runtimeConfig: { homeMode: "preconfigured" }, runtimeSkillEntries: [] });
+      expect(prepare).not.toHaveBeenCalled();
+    }
+    if (managed && saved === "isolated") expect(prepare).toHaveBeenCalledOnce();
+  });
+
+  it.each(["agent", "stored task override"] as const)("uses operator preconfigured mode despite %s configuration", async source => {
+    const f = await seed(true);
+    const nativeHome = await mkdtemp(path.join(tmpdir(), "paperclip-preconfigured-preparation-"));
+    const workspace = path.join(nativeHome, "workspace");
+    await mkdir(workspace);
+    process.env.PAPERCLIP_HOME = nativeHome;
+    await db.update(agents).set({ adapterType: "paperclip_runner", adapterConfig: {
+      provider: "codex", model: "gpt-6.1-sol", homeMode: "preconfigured", cwd: workspace,
+    } }).where(eq(agents.id, f.agentId));
+    if (source === "stored task override") {
+      await db.update(issues).set({ assigneeAdapterOverrides: { adapterConfig: { homeMode: "isolated" } } }).where(eq(issues.id, f.issueId));
+      // Old task data cannot change the operator's mode before AI routing.
+      await db.update(agents).set({ runtimeConfig: { aiConnection: { mode: "router", connectionId: "unconfigured-pool" } } }).where(eq(agents.id, f.agentId));
+    }
+    skillFailures.set(f.companyId, "Preconfigured mode must not resolve assigned skills");
+    const prepare = vi.spyOn(aiRuntime, "prepareManagedAiRuntime");
+    const beforeNative = vi.fn(async () => { throw new Error("fixture stopped before provider start"); });
+    const nativeHeartbeat = heartbeatService(db, { beforeNativeRuntimeSelection: beforeNative });
+    try {
+      const run = await nativeHeartbeat.wakeup(f.agentId, { source: "on_demand", triggerDetail: "manual", reason: "manual",
+        payload: { issueId: f.issueId }, contextSnapshot: { issueId: f.issueId } });
+      expect(run).not.toBeNull();
+      await nativeHeartbeat.drainActiveRunExecutions();
+      const saved = await nativeHeartbeat.getRun(run!.id);
+      expect(saved?.error).toContain("fixture stopped before provider start");
+      expect(beforeNative).toHaveBeenCalledOnce();
+      expect(prepare).not.toHaveBeenCalled();
+      expect(saved?.contextSnapshot?.aiConnection).toBeUndefined();
+    } finally {
+      await nativeHeartbeat.drainActiveRunExecutions();
+      process.env.PAPERCLIP_HOME = home;
+      // Native preparation seals context bundles; release only this test's tree.
+      const release = async (directory: string): Promise<void> => {
+        await chmod(directory, 0o700);
+        for (const entry of await readdir(directory, { withFileTypes: true })) {
+          if (entry.isDirectory()) await release(path.join(directory, entry.name));
+        }
+      };
+      await release(nativeHome);
+      await rm(nativeHome, { recursive: true, force: true });
+    }
+  });
 
   async function configuration(f: Awaited<ReturnType<typeof seed>>, config: Record<string, unknown>, snapshot: Record<string, unknown> = {}, type = "paperclip_runner") {
     const [agent] = await db.update(agents).set({ adapterType: type, adapterConfig: config }).where(eq(agents.id, f.agentId)).returning();

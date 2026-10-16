@@ -43,6 +43,23 @@ launch context does not travel with each policy or parent-report check. JSON
 types, task-key precedence, and company and agent identity checks are preserved.
 Each decision still reads current data; this is not an authorization cache.
 
+The initial agent JWT run lookup reads only the cancellation state and
+conversation flag from saved run JSON. It does not transfer the full context or
+result. Run status, responsible-user identity, company and agent boundaries,
+and the cancellation response remain unchanged. Later identity refreshes keep
+their existing transaction and data reads.
+
+To measure authentication query responses on disposable synthetic data:
+
+```sh
+pnpm --filter @paperclipai/server exec tsx ../scripts/benchmark-agent-authentication.ts --baseline-ref=06689c1b3410000bcd65ff40cb469e600209c4db
+```
+
+This compares the current query with the original query in that revision. It
+checks the complete authentication decision and reports returned JSON bytes,
+local query timings, and execution plans. It does not measure request latency
+or fleet-wide savings.
+
 To compare the real summary and full history queries with an earlier revision:
 
 ```sh
@@ -950,3 +967,16 @@ This disposable fixture compares the real ownership, recovery-action and status
 delivery queries, including complete positional results and database plans.
 All data is synthetic. Query timings exclude process liveness probes, HTTP and
 provider work.
+
+### Agent runtime synchronization journal
+
+Migration 0347 adds the opt-in `agent_runtime` resource stream. Database triggers
+record content-free configuration invalidations and managed file audit events in
+`resource_lifecycle_events`. They share the mutation transaction and fail the
+mutation if journal insertion fails. An INSERT trigger sends an empty PostgreSQL
+notification on `paperclip_plugin_lifecycle` after commit. The host subscribes
+only when a ready runtime subscriber is installed. This feature requires a
+session-compatible database connection; do not enable it through a transaction
+pooler. Reconnection scans the durable journal. Existing process-local work
+signals continue to serve other delivery queues. See
+[the plugin contract](plugins/AGENT_RUNTIME_SYNC.md).

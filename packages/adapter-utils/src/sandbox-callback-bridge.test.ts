@@ -379,8 +379,9 @@ describe("sandbox callback bridge", () => {
     });
     expect(feedbackResponse.status).toBe(200);
     await feedbackResponse.arrayBuffer();
-    expect(seenRequests[2]).toMatchObject({ method: "POST", path: "/api/companies/company-1/agent-commentary", body: feedbackBody });
-    expect(seenRequests[2]?.headers.authorization).toBeUndefined();
+    expect(seenRequests).toHaveLength(4);
+    expect(seenRequests[3]).toMatchObject({ method: "POST", path: "/api/companies/company-1/agent-commentary", body: feedbackBody });
+    expect(seenRequests[3]?.headers.authorization).toBeUndefined();
 
   });
 
@@ -1507,6 +1508,42 @@ describe("sandbox callback bridge", () => {
 
     // Nothing was written to the remote path on the failure path.
     await expect(readFile(remotePath, "utf8")).rejects.toThrow();
+  });
+
+  it.each([
+    "/api/companies/co-1/heartbeat-runs",
+    "/api/companies/co-1/live-runs",
+    "/api/heartbeat-runs/run-1",
+    "/api/heartbeat-runs/run-1/events",
+    "/api/heartbeat-runs/run-1/log",
+    "/api/heartbeat-runs/run-1/workspace-operations",
+    "/api/heartbeat-runs/run-1/issues",
+    "/api/issues/issue-1/runs",
+    "/api/issues/issue-1/recovery-actions",
+  ])("admits only GET for diagnostic path %s on both transports", (requestPath) => {
+    for (const routes of [undefined, HTTP2_SANDBOX_CALLBACK_BRIDGE_ROUTE_ALLOWLIST]) {
+      expect(authorizeSandboxCallbackBridgeRequestWithRoutes({ method: "GET", path: requestPath }, routes)).toBeNull();
+      for (const method of ["POST", "PUT", "PATCH", "DELETE"]) {
+        expect(authorizeSandboxCallbackBridgeRequestWithRoutes({ method, path: requestPath }, routes))
+          .toBe(`Route not allowed: ${method} ${requestPath}`);
+      }
+      expect(authorizeSandboxCallbackBridgeRequestWithRoutes({ method: "GET", path: `${requestPath}/extra` }, routes))
+        .toBe(`Route not allowed: GET ${requestPath}/extra`);
+    }
+  });
+
+  it.each([
+    { method: "POST", path: "/api/heartbeat-runs/run-1/cancel" },
+    { method: "POST", path: "/api/heartbeat-runs/run-1/retry" },
+    { method: "POST", path: "/api/heartbeat-runs/run-1/watchdog-decisions" },
+    { method: "POST", path: "/api/issues/issue-1/recovery-actions/resolve" },
+    { method: "POST", path: "/api/issues/issue-1/recovery-actions/retry-workspace-export" },
+    { method: "GET", path: "/api/heartbeat-runs/run-1/provider-trace" },
+    { method: "GET", path: "/api/companies/co-1/provider-traces" },
+    { method: "GET", path: "/api/companies/co-1/execution-workspaces" },
+  ])("keeps execution control and unrelated reads denied: $method $path", (request) => {
+    expect(authorizeSandboxCallbackBridgeRequestWithRoutes(request))
+      .toBe(`Route not allowed: ${request.method} ${request.path}`);
   });
 
   it("permits the documented heartbeat surface and denies unrelated routes", () => {

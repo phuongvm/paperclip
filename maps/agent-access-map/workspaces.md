@@ -51,6 +51,9 @@ retain the original denial without cloning or replacing their unpublished commit
 New implicit Git defaults record project-source provenance. Untyped explicit,
 inherited and older ambiguous checkout bindings retain the denial; admission reads
 the current company-scoped binding before considering the fallback.
+A retained denial blocks the task as `configuration_incomplete`
+(`workspace_source_restricted`) before dispatch; it grants no access and names the
+owner action on the task.
 Local paths, unsupported transports and credential-bearing URLs are not fallback
 sources. Company/task/remote bindings, real paths, Git storage and the exact origin
 are revalidated for reuse, cleanup and reopening. A failed save removes only the
