@@ -64,6 +64,7 @@ impl VerifiedProcessArtifact {
         return Err(LocalRunnerError::invalid(
             "verified process snapshots are supported only on Linux and macOS",
         ));
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         Ok(Self {
             display_path,
             file: Arc::new(file),
@@ -458,16 +459,26 @@ impl VerifiedProcessLaunch {
         &self,
         environment: &std::collections::BTreeMap<String, String>,
     ) -> Result<Child, LocalRunnerError> {
-        let inherited = self.inherited_command()?;
-        Command::new(&inherited.program)
-            .args(&inherited.args)
-            .env_clear()
-            .envs(environment)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
-            .spawn()
-            .map_err(|_| LocalRunnerError::invalid("failed to spawn verified stdio MCP server"))
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        {
+            let inherited = self.inherited_command()?;
+            Command::new(&inherited.program)
+                .args(&inherited.args)
+                .env_clear()
+                .envs(environment)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::inherit())
+                .spawn()
+                .map_err(|_| LocalRunnerError::invalid("failed to spawn verified stdio MCP server"))
+        }
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        {
+            let _ = environment;
+            Err(LocalRunnerError::invalid(
+                "verified process launch is supported only on Linux and macOS",
+            ))
+        }
     }
 
     pub fn with_inherited_runtime_executable(mut self) -> Self {
