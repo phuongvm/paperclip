@@ -993,8 +993,39 @@ same cancel and fail-fast deadline as a duplex channel loss. The run fails with
 `acpStalledToolKind` (one closed `ToolKind` label or `unknown`) and
 `acpStalledToolSilentMs`. The stop-time fields above are measured when the
 watchdog fired. A live subagent's Task call keeps receiving heartbeats, so only
-a call that itself went silent trips the watchdog. Other ACP agents are watched
-only when `stalledToolTimeoutSec` is set.
+a call that itself went silent trips the watchdog. A background subagent's Task
+call completes when the subagent starts, so the watchdog watches that subagent's
+own tool calls instead. Other ACP agents are watched only when
+`stalledToolTimeoutSec` is set.
+
+The engine also observes ACP permission requests without deciding them; ACPX's
+permission mode still decides each one. A stalled run records
+`acpStalledToolPermissionRequested` (whether the stalled call's permission
+request reached Paperclip) and `acpPendingToolPermissionRequestedCount` (how many
+pending calls had one). These fields record only that a request arrived, not
+that the reply reached the agent. A call whose request never arrived stalled
+before the request reached Paperclip. A call whose request arrived stalled
+later: on the reply's return trip, or after the agent received the decision.
+Both fields hold only a boolean and a count.
+
+A missing request is informative only if calls like it normally send one. So a
+stalled run also records `acpSettledSameKindToolCount` (how many finished calls
+of the stalled call's kind the run saw) and
+`acpSettledSameKindToolPermissionRequestedCount` (how many of those sent a
+permission request). These counts are supporting evidence, not proof of where
+the call stalled. The ACP kind is coarse, so peers of the same kind can be
+different tools with different permission rules. Read them this way:
+
+- All or nearly all finished peers sent a request, and the stalled call did not:
+  this supports a stall before the request reached Paperclip.
+- No finished peer sent a request: calls of that kind may skip the request, so
+  its absence on the stalled call says nothing about where it stalled.
+- Some finished peers sent a request and others did not: the counts do not show
+  whether the stalled call should have sent one. Compare the specific tools in
+  the run log before drawing a conclusion.
+- No finished peers (a count of zero): there is no comparison.
+
+Both fields hold only counts.
 
 ACP and legacy OpenCode results retain the adapter's resolved wall-clock timeout as
 `adapterExecutionTimeout` in the instance run result. Finalization uses it for

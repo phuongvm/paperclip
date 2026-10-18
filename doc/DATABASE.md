@@ -43,6 +43,13 @@ launch context does not travel with each policy or parent-report check. JSON
 types, task-key precedence, and company and agent identity checks are preserved.
 Each decision still reads current data; this is not an authorization cache.
 
+Repository-root checks load retained run, agent and task identities in batches
+of at most 500 IDs. They keep each run's task binding, responsible user and saved
+policy separate, even when several runs use the same agent. Project settings and
+saved policies for batched read authorization are also loaded once per operation.
+The next admission or publication reloads these records and permission grants.
+The queries exclude run results and unused launch context.
+
 The initial agent JWT run lookup reads only the cancellation state and
 conversation flag from saved run JSON. It does not transfer the full context or
 result. Run status, responsible-user identity, company and agent boundaries,
@@ -294,6 +301,18 @@ completed lookups and the separate liveness backfill are not replayed. Projectio
 callers that use a transaction retain single-attempt reads. The opt-in is only
 for a pooled database handle outside a transaction.
 
+## Tool profile reads
+
+Tool profile list, detail, and new-tool review queries select only the catalog
+identity, selector, and review fields that they use. They do not load tool input
+or output schemas, annotations, or provider metadata. Application and connection
+lookups for these paths read only IDs and display names. Profile entries,
+bindings, counts, review descriptions, and company filters retain their existing
+behavior. The full catalog and tool execution paths still read their schemas.
+Attention counts use the same catalog projection and read only invocation IDs
+and connection IDs to associate pending requests. Summary queries also omit
+review titles and descriptions; the separate review query still returns them.
+
 ## Execution identity row locks
 
 Identity initialization, credential acquisition, and steering reconciliation lock
@@ -391,6 +410,14 @@ restart with stale provider variables on an isolated warm application first.
 Rollback by setting the marker to `0` and restarting. No schema changes are
 required. This mechanism does not sleep claimed workspaces or replace a durable
 scheduler for their background work.
+
+## Feedback history and idle sleep
+
+Automatic idle checks treat private, unshared feedback as saved data. A sent
+feedback export is history only when its completion timestamp exists and its
+failure reason is clear. Pending, failed, unknown, and inconsistent exports
+still keep the instance awake. These checks do not delete history or change
+feedback sharing and retry behavior.
 
 ## Resource membership tables
 
