@@ -17,6 +17,7 @@ import type {
 import { heartbeatsApi } from "@/api/heartbeats";
 import { nativeRunEventsToTranscript } from "./transcript/native-run-events";
 import { pendingConnectionIntentInteraction } from "@/fixtures/issueThreadInteractionFixtures";
+import { TaskChatScrollNavigation } from "./task-chat/scroll-navigation";
 import type { HeartbeatRunEvent } from "@paperclipai/shared";
 
 const transcriptState = vi.hoisted(() => ({
@@ -312,20 +313,21 @@ it.each([true, false])("interleaves browser sessions with their requests and pre
   expect(anchors()).toEqual(expected);
 });
 
-it("coordinates first reveal while keeping the composer and visible history mounted through refresh", async () => {
-  sidebarState.isMobile = true;
+it.each([true, false])("defers hidden content until history is ready and keeps it mounted through refresh (mobile=%s)", async (mobile) => {
+  sidebarState.isMobile = mobile;
   const props = {
     issueId: "coordinated-issue",
     comments: [],
     onAdd: async () => {},
   };
   render(<TaskChatThread {...props} initialHistoryPending />);
-  const composer = container.querySelector('[data-testid="mock-editor"]');
-  expect(composer).not.toBeNull();
+  expect(container.querySelector('[data-testid="mock-editor"]')).toBeNull();
   expect(container.querySelector('[aria-busy="true"]')).not.toBeNull();
-  expect(container.querySelector('.task-chat-history-pending')).not.toBeNull();
+  expect(Boolean(container.querySelector('.task-chat-history-pending'))).toBe(mobile);
   expect(container.querySelector('[data-testid="task-chat-composer-dock"]')?.hasAttribute("inert")).toBe(true);
   render(<TaskChatThread {...props} initialHistoryPending={false} />);
+  const composer = container.querySelector('[data-testid="mock-editor"]');
+  expect(composer).not.toBeNull();
   await act(async () => {
     await new Promise((resolve) => requestAnimationFrame(resolve));
   });
@@ -339,6 +341,70 @@ it("coordinates first reveal while keeping the composer and visible history moun
   ).toBeNull();
   expect(container.querySelector('[data-testid="mock-editor"]')).toBe(composer);
   expect(container.querySelector('.task-chat-history-pending')).toBeNull();
+});
+
+it("defers initial history for a saved conversation with its own draft key", () => {
+  render(<TaskChatThread comments={[]} onAdd={async () => {}} issueId="saved-chat"
+    conversationMode draftKey="agent-chat:company:saved-agent" initialHistoryPending />);
+  expect(container.querySelector('[data-testid="mock-editor"]')).toBeNull();
+  expect(container.querySelector('[data-testid="task-chat-composer-dock"]')?.hasAttribute("inert")).toBe(true);
+});
+
+it.each([true, false])("keeps an upload attached when a conversation draft becomes a saved task (mobile=%s)", async (mobile) => {
+  sidebarState.isMobile = mobile;
+  const onAdd = vi.fn().mockResolvedValue(undefined);
+  let resolveUpload!: (receipt: { id: string; contentPath: string; originalFilename: string }) => void;
+  const onAttachImage = vi.fn().mockReturnValue(new Promise(resolve => { resolveUpload = resolve; }));
+  const props = { comments: [], onAdd, onAttachImage, conversationMode: true, draftKey: "agent-chat:company:agent" };
+  render(<TaskChatThread {...props} issueId="" />);
+  const composer = container.querySelector('[data-testid="mock-editor"]');
+  const input = container.querySelector<HTMLInputElement>('input[type="file"]')!;
+  const file = new File(["notes"], "chat-notes.txt", { type: "text/plain" });
+  Object.defineProperty(input, "files", { configurable: true, value: [file] });
+  await act(async () => { input.dispatchEvent(new Event("change", { bubbles: true })); });
+  expect(onAttachImage).toHaveBeenCalledExactlyOnceWith(file);
+  expect(container.querySelector('[data-testid="task-chat-composer-attachments"]')?.textContent).toContain("chat-notes.txt");
+
+  render(<TaskChatThread {...props} issueId="persisted-chat" initialHistoryPending />);
+  expect(container.querySelector('[data-testid="mock-editor"]')).toBe(composer);
+  expect(container.querySelector('[data-testid="task-chat-composer-attachments"]')?.textContent).toContain("chat-notes.txt");
+  expect(onAdd).not.toHaveBeenCalled();
+  const id = "9af8228f-0be7-45ae-a104-6fbe0af6f1d3";
+  await act(async () => { resolveUpload({ id, contentPath: `/api/attachments/${id}/content`, originalFilename: file.name }); });
+  render(<TaskChatThread {...props} issueId="persisted-chat" initialHistoryPending={false} />);
+  await act(async () => { await new Promise(resolve => requestAnimationFrame(resolve)); });
+  const chip = container.querySelector('[data-testid="task-chat-composer-attachments"] [data-slot="attachment"]');
+  expect(chip?.getAttribute("data-state")).toBe("done");
+  const send = container.querySelector<HTMLButtonElement>('[data-testid="task-chat-composer-send"]')!;
+  expect(send.disabled).toBe(false);
+  await act(async () => { send.click(); });
+  expect(onAdd).toHaveBeenCalledTimes(1);
+  expect(onAdd.mock.calls[0]?.[0]).toBe(`[chat-notes.txt](/api/attachments/${id}/content)`);
+  expect(onAdd.mock.calls[0]?.[3]).toEqual([id]);
+});
+
+it("prepares comment-link history and its composer before reveal", async () => {
+  const props = {
+    issueId: "linked-issue",
+    comments: createLongThreadComments(),
+    onAdd: async () => {},
+  };
+  const show = (pending: boolean) => render(
+    <TaskChatScrollNavigation.Provider value={{ key: "linked-entry", hash: "#comment-comment-1", restore: false }}>
+      <TaskChatThread {...props} initialHistoryPending={pending} />
+    </TaskChatScrollNavigation.Provider>,
+  );
+  show(true);
+  const composer = container.querySelector('[data-testid="mock-editor"]');
+  const row = container.querySelector('[data-thread-anchor="comment-1"]');
+  expect(composer).not.toBeNull();
+  expect(row).not.toBeNull();
+  expect(row?.closest('[inert]')).not.toBeNull();
+  show(false);
+  await act(async () => { await new Promise((resolve) => requestAnimationFrame(resolve)); });
+  expect(container.querySelector('[aria-busy="false"]')).not.toBeNull();
+  expect(container.querySelector('[data-testid="mock-editor"]')).toBe(composer);
+  expect(container.querySelector('[data-thread-anchor="comment-1"]')).toBe(row);
 });
 
 it.each([true, false])("reveals saved conversation when initial history stalls (mobile=%s)", async (mobile) => {
@@ -356,10 +422,12 @@ it.each([true, false])("reveals saved conversation when initial history stalls (
       onAdd: async () => {},
     };
     render(<TaskChatThread {...props} initialHistoryPending />);
-    const composer = container.querySelector('[data-testid="mock-editor"]');
+    expect(container.querySelector('[data-testid="mock-editor"]')).toBeNull();
     await act(async () => { await vi.advanceTimersByTimeAsync(14_999); });
     expect(container.querySelector('[data-testid="task-chat-history-loading"]')).not.toBeNull();
     await act(async () => { await vi.advanceTimersByTimeAsync(1); });
+    const composer = container.querySelector('[data-testid="mock-editor"]');
+    expect(composer).not.toBeNull();
     expect(container.querySelector('[data-testid="task-chat-history-loading"]')).toBeNull();
     expect(container.querySelector('[data-testid="task-chat-history-content"]')?.hasAttribute("inert")).toBe(false);
     expect(container.querySelector('[data-testid="task-chat-composer-dock"]')?.hasAttribute("inert")).toBe(false);
@@ -461,8 +529,8 @@ describe.each(["legacy", "native"] as const)("%s task history readiness", (runti
       expect(
         container.querySelector('[data-testid="task-chat-history-loading"]'),
       ).not.toBeNull();
-      expect(container.textContent).toContain("Thread message 1");
-      expect(container.querySelector('[data-thread-anchor="comment-1"]')?.closest('[inert]')).not.toBeNull();
+      expect(container.textContent).not.toContain("Thread message 1");
+      expect(container.querySelector('[data-thread-anchor="comment-1"]')).toBeNull();
       transcriptState.hydratedRunIds = new Set(["started-run"]);
       nativeTranscriptState.hydratedRunIds = new Set(["started-run"]);
       transcriptState.transcriptByRun.set("started-run", [{

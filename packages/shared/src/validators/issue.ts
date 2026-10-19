@@ -1,5 +1,7 @@
 import { taskWorkspaceSelectionSchema } from "./task-workspace.js";
 import { z } from "zod";
+import { ISSUE_SUMMARIES_MAX_IDS } from "../constants.js";
+
 import {
   ISSUE_EXECUTION_DECISION_OUTCOMES,
   ISSUE_EXECUTION_MONITOR_CLEAR_REASONS,
@@ -43,6 +45,12 @@ import {
 } from "./trust-policy.js";
 import { objectWithoutDefaults } from "./partial.js";
 import { questionSetToAskUserQuestionsPayload } from "../question-set.js";
+
+export const issueSummariesQuerySchema = z.object({
+  ids: z.string().transform((value) => value.split(",").map((id) => id.trim().toLowerCase()))
+    .pipe(z.array(z.string().guid()).min(1).max(ISSUE_SUMMARIES_MAX_IDS))
+    .transform((ids) => [...new Set(ids)]),
+}).strict();
 
 export const issueBlockedInboxStateSchema = z.enum([
   "needs_attention",
@@ -915,6 +923,7 @@ export const updateIssueSchema = objectWithoutDefaults(
 )
   .partial()
   .extend({
+    expectedStatusVersion: z.number().int().nonnegative().optional(),
     /** Reject a policy write if the policy changed after the caller read it. */
     expectedExecutionPolicy: z.record(z.string(), z.unknown()).optional().nullable(),
     requestDepth: issueRequestDepthInputSchema.optional(),
