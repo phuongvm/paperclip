@@ -35,7 +35,7 @@ export const AGENT_ADAPTER_TYPES = [
   "gemini_local",
   "grok_local",
   "hermes_gateway",
-  // PAPERCLIP-INV-5: Hermes adapter registration
+  // PAPERCLIP-INV-5: Hermes adapter registration (reconciled v1.5.2)
   "hermes_local",
   "kimi_local",
   "opencode_local",
