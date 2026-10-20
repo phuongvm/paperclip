@@ -8,6 +8,7 @@ import {
   settleStopOnlyCleanup,
 } from "../sandbox-stop-and-retain.js";
 import { recordNativeLocalProcessStop } from "../native-local-process-stop.js";
+import { pendingCaseHandoffForRun } from "./case-handoff-lifecycle.js";
 import {
   legacyControllerBootId,
   hasLiveLegacyController,
@@ -16,6 +17,7 @@ import {
 import { remoteTerminationReceipt } from "../remote-execution-termination.js";
 import { runUsedConversationAdapter } from "../conversation-continuation.js";
 import { legacyExecutionNeedsReconciliationWithEvidence, terminalizeLegacyExecution } from "../legacy-execution-recovery.js";
+import { reconcileRetainedWorkspaces } from "../workspace-recovery.js";
 import { randomUUID } from "node:crypto";
 import {
   and,
@@ -911,6 +913,7 @@ export function createHeartbeatRecovery(db: Db, dependencies: HeartbeatRecoveryD
   }
 
   async function recoverNativeRunsAfterRestart(now = new Date()) {
+    await reconcileRetainedWorkspaces(db, environmentRuntime, resumeRemoteStopComments);
     // A result committed before the old controller stopped outranks process
     // recovery. Finish its durable workspace/status suffix before deciding
     // whether any provider authority needs to be reopened.
@@ -1965,6 +1968,7 @@ export function createHeartbeatRecovery(db: Db, dependencies: HeartbeatRecoveryD
       );
     });
     scheduleRetainedNativeSessionCleanup();
+    await reconcileRetainedWorkspaces(db, environmentRuntime, resumeRemoteStopComments);
     await dispatchPendingNativeStatusWakeups().catch((error) => {
       logger.warn(
         { err: error },
@@ -2358,6 +2362,7 @@ export function createHeartbeatRecovery(db: Db, dependencies: HeartbeatRecoveryD
         !revokedState.processPid &&
         !revokedState.processGroupId;
       const shouldRetry =
+        !await pendingCaseHandoffForRun(db, run.id, run.companyId) &&
         (run.processLossRetryCount ?? 0) < 1 &&
         ((tracksLegacyLocalChild &&
           (!!run.processPid || !!run.processGroupId)) ||

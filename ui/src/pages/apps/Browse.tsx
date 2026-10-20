@@ -1,5 +1,6 @@
 import { AGGREGATOR_NAMES, aggregatorManagementUrl, isAppAggregator, type AggregatorAppSnapshot, type AggregatorAppsResponse } from "@paperclipai/shared/aggregator-apps";
-import { CatalogSourceFilters, type CatalogSource } from "./CatalogSourceFilters";
+import type { CatalogSource } from "./CatalogSourceFilters";
+import { ConnectorsToolbar } from "./ConnectorsToolbar";
 import { ExecutorManagementSetup } from "./ExecutorManagementSetup";
 import { ArcadeDiscoverySetup } from "./ArcadeDiscoverySetup";
 import { AggregatorAppManager } from "./AggregatorAppManager";
@@ -25,7 +26,6 @@ import {
   Loader2,
   MoreHorizontal,
   PauseCircle,
-  Search,
   ServerCog,
   Trash2,
 } from "lucide-react";
@@ -79,7 +79,6 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { Input } from "@/components/ui/input";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { AGGREGATOR_APP_CATALOG, aggregatorAppIdentity, findComposioCatalogApp, type AggregatorAppCatalogEntry } from "@paperclipai/shared/aggregator-app-catalog";
 import { AggregatorConnectDialog, aggregatorAppConnectHref } from "./AggregatorConnectDialog";
@@ -319,7 +318,7 @@ function connectorAction(
   // Tool connectors retain their capability-specific setup verbs.
   if (row.entry) {
     return {
-      label: row.entry.methods?.some(method => method.purpose === "ai") ? "Connect" : connectionSetupVerbForApp(row.entry),
+      label: row.entry.methods?.every(method => method.purpose === "ai") ? "Connect" : connectionSetupVerbForApp(row.entry),
       href: connectHrefFor(row.entry),
     };
   }
@@ -898,20 +897,8 @@ export function Browse({ renderAccountDetails = (connection) => connection.conne
 
   return (
     <div ref={catalogTop} className="max-w-5xl space-y-5 pb-12">
-      <header className="flex flex-col items-start gap-3">
-        <div className="relative w-full max-w-md">
-          <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
-          <Input
-            type="search"
-            value={query}
-            onChange={(event) => changeQuery(event.target.value)}
-            placeholder="Search connectors…"
-            aria-label="Search connectors"
-            className="pl-9"
-          />
-        </div>
-        <CatalogSourceFilters source={source} onChange={value => { setSource(value); setExpandedSearch(false); setPage(1); }} />
-      </header>
+      <ConnectorsToolbar query={query} onQueryChange={changeQuery} source={source}
+        onSourceChange={value => { setSource(value); setExpandedSearch(false); setPage(1); }} />
 
       {loadFailed ? (
         <div
@@ -1113,6 +1100,9 @@ export function ConnectorCard({
     chatProviderVisible(row.slug, chatConnectorsEnabled, githubReviewBotsEnabled),
     preselectedAgentId,
   );
+  const copilotMethod = row.slug === "github"
+    ? getAppStoreDefinition(row.slug)?.methods.find(method => method.purpose === "ai" && method.ai?.provider === "github")
+    : undefined;
   const upstreamAccounts = (row.upstreamApps ?? []).flatMap(snapshot => {
     const connection = connectionById?.get(snapshot.connectionId);
     return connection ? snapshot.accounts.map((account, index) => ({ connection, account, snapshot,
@@ -1166,6 +1156,14 @@ export function ConnectorCard({
             {row.aggregatorApp && row.upstreamApps?.some(app => app.accounts.length > 0) ? `Accounts managed in ${[...new Set(row.upstreamApps?.map(app => AGGREGATOR_NAMES[app.provider ?? "composio"]))].join(" and ")}.` : row.description}
           </p>
         </div>
+        {copilotMethod && <Button
+          type="button"
+          size="sm"
+          variant="outline"
+          onClick={() => onNavigate(`/apps/connect?source=github&method=${encodeURIComponent(copilotMethod.key)}`)}
+        >
+          Connect Copilot
+        </Button>}
         <Button
           type="button"
           size="sm"

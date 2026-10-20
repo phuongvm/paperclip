@@ -6,27 +6,29 @@ navigation: {"section":"Agents and reusable capabilities","sectionOrder":30,"ord
 
 Operators discover or import skills, author and test them in Skill Studio, manage source versions, and decide which agents may use them.
 
+Feature ID: `skills`.
+
 Implementation: [skill library](../../ui/src/pages/CompanySkills.tsx), [studio](../../ui/src/pages/SkillStudio.tsx), [sources](../../ui/src/pages/SkillSources.tsx), [agent skills](../../ui/src/pages/agent-skills/AgentSkillsTab.tsx).
 
 Agent access: [companion](../agent-access-map/skills.md).
 
 ## Sub-features
 
-- `discovery`: browse installed/discover views and import a skill or source.
-- `authoring`: create/edit a writable skill or fork a read-only source.
-- `versions`: inspect revisions, source updates, diffs, and selected releases.
-- `policy`: apply agent enablement and skill usage policy independently from installation.
-- `testing`: run a bounded Studio test and inspect its result and interactions.
+- `discovery`: `skills/discovery` — browse installed/discover views and import a skill or source.
+- `authoring`: `skills/authoring` — create/edit a writable skill or fork a read-only source.
+- `versions`: `skills/versions` — inspect revisions, source updates, diffs, and selected releases.
+- `policy`: `skills/policy` — apply agent enablement and skill usage policy independently from installation.
+- `testing`: `skills/testing` — run a bounded Studio test and inspect its result and interactions.
 
 ## How to get to it (user POV)
 
 ### `library-sources`
 
-Open `/skills`, Discover, or `/skills/sources`; project import is available through the library’s import flow.
+Open `/skills`, Discover, or `/skills/sources`; project import is available through the library’s import flow. In Streamlined UI, Installed, Discover and My Skills are route links styled as tabs beneath the toolbar, with no secondary navigation rail. Sources stays separate under New → Manage sources. Legacy UI retains the Skills sidebar.
 
 ### `studio`
 
-Use New skill or `/skills/studio/:skillId`; writable copies and source-backed originals differ.
+Use New skill or `/skills/studio/:skillId`; writable copies and source-backed originals differ. In Streamlined UI, `/skills/studio` uses the shared Skills toolbar and card collection with My Skills active and Recently updated sorting; opening a card enters Studio.
 Direct authoring starts at `/skills/studio/new`: fill **Name** and **Slug**, then
 **Create skill**. Authoring/save/reload requires no model credential; running a
 Studio test is separate.
@@ -128,6 +130,8 @@ Open Choose connection while a source is being refreshed. Select an authorized a
 ### Storybook verification
 
 #### `testing`
+
+Capability ID: `skills/testing`.
 
 Scope: ui
 Storybook: Studio test inputs/configuration, running, question/approval, result and failed test states.

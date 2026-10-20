@@ -1,5 +1,7 @@
 import { applyObservabilityEnvironment, type ProviderObservabilityLaunch } from "@paperclipai/adapter-utils/agent-observability";
 import { museRunnerBroker } from "../muse-runner-broker.js";
+import { nativeCaseHandoffResult } from "./native-case-handoff.js";
+import { assertExternalNativeRunAuthority } from "./external-native-authority.js";
 import { stageRemoteLaunchAssets } from "./remote-launch-assets.js";
 import { createRunPreparationTiming } from "../execution-preparation-timing.js";
 import { configuredEnvironment } from "../../vendor/paperclip-runner/index.js";
@@ -34,7 +36,7 @@ import { copyBackCodexAuth } from "@paperclipai/adapter-codex-local/server";
 import { nativeCompletionFeedback } from "./native-completion-feedback.js";
 import { hasAcknowledgedNativeReassignmentStopIntent, hasAcknowledgedNativeStopIntent } from "../acknowledged-native-stop.js";
 import { stoppedCodexTurnIsTextOnly } from "./stopped-codex-turn.js";
-import { prepareVerifiedRemoteProviderPack, useVerifiedPreinstalledRemoteProviderPack, runRemoteProviderVerification } from "./remote-provider-pack.js";
+import { prepareVerifiedRemoteProviderPack, useVerifiedPreinstalledRemoteProviderPack, runRemoteProviderVerification, shouldUseBundledAcpxImageAssets } from "./remote-provider-pack.js";
 import { readProviderPackArchive, stageProviderPackArchive } from "./provider-pack-archive.js";
 import { selectRemotePiCompanion } from "./remote-pi-companion.js";
 import { readNativeLocalProcessStop, PROCESS_START_REQUESTED } from "../native-local-process-stop.js";
@@ -168,6 +170,7 @@ import {
 } from "./remote-runner-recovery-diagnostics.js";
 import { readRemoteRunnerRecoveryProbe, REMOTE_RUNNER_RECOVERY_PROBE_BUDGET_MS } from "./remote-runner-recovery-probe.js";
 import { inspectRemoteWarmSessionRecovery, type RemoteWarmSessionRecovery } from "./remote-warm-session-recovery.js";
+import { emitStartupReuse, environmentStartupReuse } from "@paperclipai/adapter-utils/startup-reuse";
 import { persistActivity, publishActivity } from "../activity-log.js";
 import { commitNativeStatusDecision } from "./status-decision-committer.js";
 import { resolvePaperclipInstanceRoot } from "../../home-paths.js";
@@ -1664,10 +1667,16 @@ const initializingSessionToolAuthorities = new Set<string>();
 const executingRunnerdSessionScopes = new Map<string, string>();
 const executingNativeOwnerScopes = new Map<string, symbol>();
 
-async function assertExternalNativeRunAuthority(db: Db, execution: NativeExecutionInput, authorityDatabase: Db = db): Promise<void> {
-  if (execution.schema === "paperclip.native-execution-input.v6") return dotRunnerBroker(db).assertRunAuthority(execution);
-  if (execution.schema === "paperclip.native-execution-input.v8") return museRunnerBroker(db).assertRunAuthority(execution, authorityDatabase);
-  throw new Error("external_native_execution_required");
+export function nativeSessionScopeDigestIsBusy(digest: string): boolean {
+  const scopes = [
+    ...executingRunnerdSessionScopes.keys(),
+    ...initializingSessionToolAuthorities,
+    ...warmNativeSessions.keys(),
+    ...closingWarmNativeSessions.keys(),
+  ];
+  return scopes.some(
+    (scope) => createHash("sha256").update(scope).digest("hex") === digest,
+  );
 }
 
 function nativeSessionKey(execution: NativeExecutionInput): string {
@@ -7486,6 +7495,7 @@ function startNativeSessionExecutionLeaseRenewal(input: {
 }
 
 export async function executePaperclipNativeSession(input: {
+  casesEnabled?: boolean;
   getFreshSessionHandoff?: () => Promise<string | null>;
   /** Retire a retained transport so recovery can replace provider tool declarations. */
   refreshTools?: boolean;
@@ -7777,6 +7787,10 @@ async function executePaperclipNativeSessionWithinScope(
     startedAtMs: preparationStarts.runStartedAtMs,
     onEvent: input.onEvent,
   });
+  await emitStartupReuse(input.onEvent, "environment", environmentStartupReuse(input.runnerExecutionTarget));
+  if (!input.runnerExecutionTarget || input.runnerExecutionTarget.kind === "local") {
+    await emitStartupReuse(input.onEvent, "workspace", { state: "not_applicable", reason: "not_applicable" });
+  }
   const toolTrace = createNativeToolTrace(trace);
   const taskPrepareScope = trace.start("task.prepare", {
     parentName: "task.provider_session",
@@ -8285,12 +8299,16 @@ async function executePaperclipNativeSessionWithinScope(
         ) {
           sessionStartedAtMs = milestoneAtMs;
           sessionStartupMode = "bootstrap";
+          await emitStartupReuse(input.onEvent, "provider_session", { state: "fresh", reason: "created" });
           await trace.record({
             name: "runner.session.bootstrap",
             parentName: "runner.session.startup",
             startedAtMs: nativeSessionExecuteStartedAtMs,
             endedAtMs: milestoneAtMs,
           });
+        }
+        if (event.eventType === "session.resumed") {
+          await emitStartupReuse(input.onEvent, "provider_session", { state: "reused", reason: "verified_reuse" });
         }
         if (
           event.eventType === "turn.submitted" &&
@@ -8610,6 +8628,8 @@ async function executePaperclipNativeSessionWithinScope(
         if (entry.idleTimer !== null) clearTimeout(entry.idleTimer);
         entry.idleTimer = null;
         existingWarmSession = entry.session;
+        await emitStartupReuse(input.onEvent, "runner", { state: "reused", reason: "verified_reuse" });
+        await emitStartupReuse(input.onEvent, "provider_session", { state: "reused", reason: "verified_reuse" });
         githubAccess = entry.githubAccess;
       }
     } else {
@@ -8621,6 +8641,9 @@ async function executePaperclipNativeSessionWithinScope(
     }
   }
   async function resolvePendingGovernedWait() {
+    const handoff = await nativeCaseHandoffResult(input.db, { ...input.execution.binding,
+      completionContract: input.execution.completionContract.contract });
+    if (handoff) return handoff;
     const continuingInteractionIds = continuingPendingInteractionIds(
       input.execution,
     );
@@ -8779,6 +8802,8 @@ async function executePaperclipNativeSessionWithinScope(
       if (!recovered?.recovered || !recovered.session) throw new Error("runner_state_identity_mismatch: remote_warm_session_unproven");
       if (remoteWarmRecovery.reuseProcess) {
         existingWarmSession = recovered.session;
+        await emitStartupReuse(input.onEvent, "runner", { state: "reused", reason: "verified_reuse" });
+        await emitStartupReuse(input.onEvent, "provider_session", { state: "reused", reason: "verified_reuse" });
         persistedWarmSession = null;
       } else {
         await recovered.session.close({ reason: "recovered warm session requires current process configuration" });
@@ -9717,7 +9742,10 @@ async function executePaperclipNativeSessionWithinScope(
     // throwing. Heartbeat still stops its sandbox, so retire the provider now
     // while its transport can collect files and checkpoint the suspended runner.
     // Leaving it in the warm map makes the next turn retire a stopped transport.
-    const retainSession = native.terminal.runTerminalState === "succeeded";
+    // A different agent may next use this same task workspace. Persist this
+    // agent's session checkpoint, then close its provider process before the
+    // heartbeat release proof. Returning later resumes its own saved session.
+    const retainSession = native.terminal.runTerminalState === "succeeded" && native.result.continuation?.kind !== "case_handoff";
     const instructionCopy = input.instructionWorkingCopy;
     const ownedSession = warmNativeSessions.get(warmSessionId);
     let collectInstructions: boolean;
@@ -10079,7 +10107,7 @@ type RemoteProviderPackManifest = {
     distDigest: string;
     bridgeDigest: string;
     acpxProfileDigests: typeof REMOTE_PROVIDER_PACK_PROFILE_DIGESTS;
-    providers?: Partial<Record<"pi" | "cursor", {
+    providers?: Partial<Record<"pi" | "cursor" | "copilot", {
       version: string; profileDigest: string; closureDigest: string; qualification: "qualified" | "pending";
       path: string; sha256: string;
     }>>;
@@ -10268,10 +10296,9 @@ function readRemoteProviderPackIdentity(packRoot: string, verifyControllerFiles:
     }
     for (const [provider, candidate] of Object.entries(candidates)) {
       const expectedPath = `provider-assets/${provider}/${payload.target.platform}-${payload.target.architecture}`;
-      if (!(inventory === "providers" ? ["pi", "cursor"] : ["cursor", "copilot", "pi"]).includes(provider) || !candidate
+      if (!(inventory === "providers" ? ["pi", "cursor", "copilot"] : ["cursor", "copilot", "pi"]).includes(provider) || !candidate
         || Object.keys(candidate).some(key => !["version", "profileDigest", "closureDigest", "qualification", "path", "sha256"].includes(key))
-        || candidate.qualification !== (["pi", "cursor"].includes(provider) ? "qualified" : "pending")
-        || candidate.path !== expectedPath
+        || candidate.qualification !== (["pi", "cursor"].includes(provider) || inventory === "providers" && provider === "copilot" ? "qualified" : "pending") || candidate.path !== expectedPath
         || typeof candidate.version !== "string" || !candidate.version || candidate.version.length > 120
         || !/^sha256:[a-f0-9]{64}$/.test(candidate.profileDigest)
         || !/^sha256:[a-f0-9]{64}$/.test(candidate.closureDigest)
@@ -10287,6 +10314,21 @@ function readRemoteProviderPackIdentity(packRoot: string, verifyControllerFiles:
           || candidate.profileDigest !== QUALIFIED_ACPX_PROFILES.cursor.commandDigest
           || candidate.closureDigest !== `sha256:${distribution.closureSha256}`) {
           throw new Error("runner_remote_provider_artifact_incompatible: Cursor profile or closure does not match this release");
+        }
+      }
+      if (provider === "copilot") {
+        const closurePins = {
+  "darwin-arm64": "362f2663e967fb9e34a814bac4619cbf89e6b23069c4051ab1f2f686852d0a32",
+  "darwin-x64": "c08b7c3dd4e7bcf9a3e16ec6eba29cfa10308e865d196c5f120a3a15f6b3116a",
+  "linux-x64": "a3d8f4367cfa1694d79e3f8b7930b6fbfe42a229c272b375b11951d631db8d07"
+} as const;
+        const target = `${payload.target.platform}-${payload.target.architecture}`;
+        const closure = Object.hasOwn(closurePins, target) ? closurePins[target as keyof typeof closurePins] : undefined;
+        if (!closure || (payload.providers?.copilot && payload.candidateProviders?.copilot)
+          || candidate.version !== QUALIFIED_ACPX_PROFILES.copilot.agentServerVersion
+          || candidate.profileDigest !== QUALIFIED_ACPX_PROFILES.copilot.commandDigest
+          || candidate.closureDigest !== `sha256:${closure}`) {
+          throw new Error("runner_remote_provider_artifact_incompatible: Copilot profile or closure does not match this release");
         }
       }
       if (verifyControllerFiles && sha256DirectoryTree(resolve(packRoot, candidatePath)) !== candidate.sha256) {
@@ -11333,6 +11375,7 @@ export function remoteCheckpointIncompleteFailure(
 
 /** Production runnerd backend seam, exported so provider wiring can be regression tested. */
 export async function createRunnerdBackend(input: {
+  casesEnabled?: boolean;
   db: Db;
   execution: NativeExecutionInput;
   runnerInstanceId: string;
@@ -11596,6 +11639,7 @@ async function createRunnerdBackendWithinSessionClaim(
         eq(agents.id, input.execution.binding.agentId), eq(agents.companyId, input.execution.binding.companyId),
       )).limit(1).then(rows => rows[0]) : undefined;
   const authority = new PaperclipRunnerToolAuthority(input.db, {
+    casesEnabled: input.casesEnabled === true,
     ...(nativeReview ? { nativeReview } : {}),
     connectorAssignments,
     assignedMcpTools,
@@ -11733,9 +11777,13 @@ async function createRunnerdBackendWithinSessionClaim(
   const configuredProviderPackRoot =
     input.runnerRemoteProviderPackPath?.trim() || remotePiCompanion?.providerPack || bundledClaudeRoot || null;
   let expectedProviderPackManifest: RemoteProviderPackManifest | null = null;
-  const useBundledRemoteImageAssets = requiresRemoteProviderPack && !configuredProviderPackRoot &&
-    (input.execution.provider.kind === "opencode" ||
-      (input.execution.provider.kind === "acpx" && (input.execution.provider.agent === "cursor" || remoteClaude)));
+  const useBundledRemoteImageAssets =
+    (requiresRemoteProviderPack && !configuredProviderPackRoot &&
+      (input.execution.provider.kind === "opencode" || remoteClaude)) ||
+    shouldUseBundledAcpxImageAssets({
+      requiresRemoteProviderPack, configuredProviderPackRoot,
+      provider: input.execution.provider,
+    });
   if (useBundledRemoteImageAssets) {
     expectedProviderPackManifest = bundledClaudeManifest && (remoteClaudeTarget === "linux-x64" || remoteClaudeTarget === "linux-arm64")
       ? readBundledRemoteProviderPackManifest(bundledClaudeManifest, remoteClaudeTarget)

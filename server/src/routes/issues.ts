@@ -1,6 +1,8 @@
 import { parseObject } from "../adapters/utils.js";
+import { prepareRestrictedWorkspaceRetry } from "../services/restricted-workspace-retry.js";
 import { issueSummariesQuerySchema, type IssueSummary } from "@paperclipai/shared";
 import { listIssueSummaries } from "../services/issue-summaries.js";
+import { assertNoCaseHandoffMutation } from "../services/heartbeat/case-handoff-lifecycle.js";
 import { assertLegacyRunTaskOwnership } from "../legacy-run-task-ownership.js";
 import { enqueueFastResponse } from "../services/fast-responses.js";
 import { hasRequiredWorkspaceRecovery, LEGACY_WORKSPACE_RECOVERY_SCHEMA } from "../services/workspace-restore-recovery-state.js";
@@ -97,6 +99,7 @@ import {
   resolveCreateIssueStatusDefault,
   resolveIssueRecoveryActionSchema,
   retryWorkspaceExportSchema,
+  recoverWorkspaceSchema,
   resumeWorkspaceFinalizationSchema,
   runnerGoalActionRequestSchema,
   feedbackTargetTypeSchema,
@@ -5467,6 +5470,7 @@ export function issueRoutes(
   ) {
     if (!(await assertIssueReadAllowed(req, res, issue))) return false;
     if (req.actor.type !== "agent") return true;
+    if (req.actor.runId) await assertNoCaseHandoffMutation(db, req.actor.runId, issue.id);
     const actorAgentId = req.actor.agentId;
     if (!actorAgentId) {
       res.status(403).json({ error: "Agent authentication required" });
@@ -9494,6 +9498,18 @@ export function issueRoutes(
     });
   });
 
+  router.post("/issues/:id/recovery-actions/recover-workspace", validate(recoverWorkspaceSchema), async (req, res) => {
+    assertBoard(req);
+    const issue = await getAccessibleResource(req, res, svc.getById(req.params.id as string), "Issue not found");
+    if (!issue || !(await assertIssueReadAllowed(req, res, issue))) return;
+    const decision = await decideIssueAccess(req, issue, "issue:mutate");
+    if (!decision.allowed) throw forbidden(decision.explanation, authorizationDeniedDetails(decision));
+    const { requestWorkspaceRecovery } = await import("../services/workspace-recovery.js");
+    const receipt = await requestWorkspaceRecovery({ db, companyId: issue.companyId, issueId: issue.id,
+      ...req.body, actorId: getActorInfo(req).actorId });
+    res.status(202).json(receipt);
+  });
+
   router.post("/issues/:id/recovery-actions/resume-workspace-finalization", validate(resumeWorkspaceFinalizationSchema), async (req, res) => {
     assertBoard(req);
     const issue = await getAccessibleResource(req, res, svc.getById(req.params.id as string), "Issue not found");
@@ -9713,6 +9729,10 @@ export function issueRoutes(
           { source: "recovery_action_resolution" },
         );
 
+        const workspaceRetry = outcome === "restored" && sourceIssueStatus === "todo"
+          ? await prepareRestrictedWorkspaceRetry(tx as unknown as Db, lockedIssue, activeRecoveryAction)
+          : null;
+        if (workspaceRetry) assertBoard(req);
         let repairedWorkspaceSettings: Record<string, unknown> | undefined;
         if (workspaceBaseRef) {
           const currentSettings = parseObject(lockedIssue.executionWorkspaceSettings);
@@ -9777,12 +9797,12 @@ export function issueRoutes(
         if (
           outcome === "restored" &&
           sourceIssueStatus === "todo" &&
-          (activeRecoveryAction.kind === "deliberate_wait_without_target" || workspaceBaseRef)
+          (activeRecoveryAction.kind === "deliberate_wait_without_target" || workspaceBaseRef || workspaceRetry)
         ) {
           if (
             lockedIssue.status !== "blocked" ||
             activeRecoveryAction.ownerType !== "board" ||
-            (!workspaceBaseRef && activeRecoveryAction.wakePolicy?.type !== "board_escalation") ||
+            (!workspaceBaseRef && !workspaceRetry && activeRecoveryAction.wakePolicy?.type !== "board_escalation") ||
             !activeRecoveryAction.returnOwnerAgentId ||
             lockedIssue.assigneeAgentId !== activeRecoveryAction.returnOwnerAgentId
           ) {
@@ -9947,6 +9967,14 @@ export function issueRoutes(
             });
           } else {
             await requireRecoverySourceMutationAuthority(req, lockedIssue);
+          }
+
+          if (workspaceRetry?.selection) {
+            await executionWorkspaceServiceDirect(tx as unknown as Db).selectTaskWorkspace({
+              companyId: lockedIssue.companyId, issueId: lockedIssue.id, actor: req.actor,
+              selection: workspaceRetry.selection, expectedBindingRevision: lockedIssue.workspaceBindingRevision,
+              requestKey: activeRecoveryAction.id, source: "recovery",
+            });
           }
 
           if (
@@ -13854,6 +13882,7 @@ export function issueRoutes(
         });
       const effectiveMoveToTodoRequested =
         !assigneeSelfCommentOnTerminal &&
+        !(isBlocked && !!commentBody && (await getExecutionBlocker(db, existing.companyId, existing.id))?.workspaceRepairRequired) &&
         (explicitMoveToTodoRequested ||
           (!!commentBody &&
             shouldImplicitlyMoveCommentedIssueToTodo({
@@ -18337,6 +18366,7 @@ export function issueRoutes(
         });
       const effectiveMoveToTodoRequested =
         !assigneeSelfCommentOnTerminal &&
+        !(isBlocked && (await getExecutionBlocker(db, issue.companyId, issue.id))?.workspaceRepairRequired) &&
         (explicitMoveToTodoRequested ||
           shouldImplicitlyMoveCommentedIssueToTodo({
             issueStatus: issue.status,

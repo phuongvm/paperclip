@@ -1,3 +1,4 @@
+import type { PluginTaskCredentialWritebackBinding } from "./plugin-task-credential-writeback.js";
 import { OPENROUTER_ATTRIBUTION_HEADERS, openRouterClaudeHeaders } from "@paperclipai/shared/openrouter-attribution";
 import { createHash } from "node:crypto";
 import { HttpError, unprocessable } from "../errors.js";
@@ -29,6 +30,7 @@ export function isAiConnectionBusy(error: unknown): error is HttpError {
 
 // Blank values intentionally override inherited credentials in CLI child environments.
 export const AI_AUTH_ENV_KEYS = [
+  "COPILOT_GITHUB_TOKEN",
   "PAPERCLIP_AI_PROVIDER_KEY", "PAPERCLIP_AI_PROVIDER_URL", "PAPERCLIP_CODEX_PROVIDERS",
   "GEMINI_API_KEY", "GOOGLE_API_KEY", "GOOGLE_GEMINI_BASE_URL", "GOOGLE_GENAI_USE_VERTEXAI",
   "HERMES_HOME", "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN", "AWS_BEARER_TOKEN_BEDROCK", "AWS_PROFILE", "AWS_DEFAULT_PROFILE", "AWS_SHARED_CREDENTIALS_FILE", "AWS_CONFIG_FILE", "AWS_WEB_IDENTITY_TOKEN_FILE", "AWS_ROLE_ARN", "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI", "AWS_CONTAINER_CREDENTIALS_FULL_URI",
@@ -312,6 +314,7 @@ export async function prepareManagedAiRuntime(
       ...stripAiAuthBindings(input.config.env),
       ...Object.fromEntries(AI_AUTH_ENV_KEYS.map((key) => [key, ""])),
       ...managedAiHomeEnvironment(home),
+      ...(input.binding.provider === "github" ? { GH_TOKEN: "", GITHUB_TOKEN: "" } : {}),
     };
     const capability =
       AI_CONNECTION_CAPABILITIES[input.binding.provider].methods[
@@ -383,6 +386,10 @@ export async function prepareManagedAiRuntime(
     const sessionIdentity = `${selection.grant.id}:${input.responsibleUserId ?? "shared"}:${noAuth ? "no-auth" : `${credentialRef!.secretId}:${freshness!.epoch}`}`;
     return {
       sessionIdentity,
+      ...(subscriptionFile && input.binding.provider === "openai" && credentialRef && freshness ? {
+        credentialWriteback: { grantId: selection.grant.id, secretId: credentialRef.secretId, sessionEpoch: freshness.epoch,
+          versionSelector: credentialRef.versionSelector ?? "latest" } satisfies PluginTaskCredentialWritebackBinding,
+      } : {}),
       config: {
         ...input.config,
         ...projected?.config,
