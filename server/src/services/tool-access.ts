@@ -1,6 +1,8 @@
+import { getAppDefinitionForApplicationKey, isConnectorFeatureEnabled } from "@paperclipai/shared";
 import { stableHash, descriptorHash } from "./tool-catalog-hash.js";
 import { assertProfileEntryInputs } from "./tool-profile-entry-validation.js";
 import { DAYTONA_TOOLS, daytonaClient, daytonaRisk, isDaytonaConnection, isDaytonaToolName } from "./daytona.js";
+import { connectorToolPolicy } from "./connectors/tool-policy.js";
 import { chatCredentialMutationLease } from "./chat-credential-mutation-lease.js";
 import { notifyChatEndpointWork } from "./chat-work-notifications.js";
 import { removeSlackRegistration } from "./chat-slack-registration-cleanup.js";
@@ -31,6 +33,8 @@ import {
 } from "./connector-telemetry.js";
 import { canBrowseProjectRepositoryGrant, mergeProjectRepository } from "./project-repositories.js";
 import { captureRunIdentity } from "./run-identity.js";
+import { measureRunPhase } from "./execution-preparation-timing.js";
+import { measureRunTransaction } from "./execution-transaction-timing.js";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import {
@@ -246,7 +250,7 @@ import { connectionCredentialConfigPath as credentialRefConfigPath, connectionGr
 import { agentmailApi } from "./agentmail-api.js";
 import type { ConfigureRailwaySsh, RailwaySshSetup } from "@paperclipai/shared";
 import { generateRailwaySshKey, RAILWAY_SSH_SECRET_PATH, validateRailwayKnownHosts } from "./railway-ssh.js";
-import { createRailwayClient, discoverRailwayWorkspace, isRailwayConnection, isRailwayEndpoint, isRailwayToolBlocked, normalizeRailwayToolName, RAILWAY_TOOLS, RAILWAY_TOOL_PREFIX, railwayRisk, RailwayError } from "./railway.js";
+import { createRailwayClient, discoverRailwayWorkspace, isRailwayConnection, isRailwayEndpoint, isRailwayToolBlocked, normalizeRailwayToolName, RAILWAY_TOOLS, RAILWAY_TOOL_PREFIX, RailwayError } from "./railway.js";
 import { toolAccessPolicyService } from "./tool-access-policy.js";
 import {
   readSignedToolArgumentsPayload,
@@ -2398,6 +2402,8 @@ export function classifyRisk(
   const annotations = tool.annotations ?? {};
   if (annotations.destructiveHint === true || annotations.destructive === true)
     return "destructive";
+  const reviewedRisk = connectorToolPolicy(sourceTemplateKey).classifyRisk?.(tool);
+  if (reviewedRisk) return reviewedRisk;
   const normalizedToolName = normalizedProviderToolName(tool.name);
   if (isMemoryConnectorId(sourceTemplateKey)) {
     if (verbMatches(tool.name, "delete|remove|destroy|forget|prune|reset")) return "destructive";
@@ -2417,21 +2423,11 @@ export function classifyRisk(
   if (sourceTemplateKey === "browser-use-cloud") {
     return BROWSER_USE_TOOLS.find(t => t.name === tool.name)?.annotations.readOnlyHint ? "read" : "destructive";
   }
-  if (sourceTemplateKey === "daytona") return daytonaRisk(tool.name);
-  if (sourceTemplateKey === "railway") {
-    const reviewed = railwayRisk(normalizedToolName);
-    return reviewed === "read" && (annotations.readOnlyHint === false || annotations.writeHint === true) ? "write" : reviewed;
-  }
   // Fireflies sharing, moving, and access revocation are mutations even when
   // a provider omits annotations or mistakenly advertises a read hint.
   if (sourceTemplateKey === "fireflies" && [
     "fireflies-share-meeting", "fireflies-revoke-meeting-access", "fireflies-move-meeting",
   ].includes(normalizedToolName)) return "write";
-  // Enterpret's run_graph_query self-reports readOnlyHint: true, but Cypher is
-  // not a read-only language and live validation never established the tool as
-  // safe. Treat it as write so Ask-first defaults can restrict it.
-  if (sourceTemplateKey === "enterpret" && normalizedToolName === "run-graph-query")
-    return "write";
   // Gmail archive removes a system label. Keep it behind the archive method's
   // destructive Ask-first default even when the preview provider omits hints.
   if (sourceTemplateKey === "gmail" && normalizedToolName === "unlabel-thread")
@@ -2446,6 +2442,19 @@ export function classifyRisk(
     if (verbMatches(tool.name, "delete|remove|destroy|revoke")) return "destructive";
     if (annotations.readOnlyHint === false || annotations.writeHint === true) return "write";
     return /^(list|get)-/.test(normalizedToolName) || annotations.readOnlyHint === true ? "read" : "write";
+  }
+  // Ditto's translate, link and unlink tools replace saved text or developer
+  // IDs, but the generic classifier reads those verbs as reads. Only
+  // list/get/search tools, suggest_edit, and tools Ditto marks read-only are
+  // reads.
+  if (sourceTemplateKey === "ditto") {
+    if (verbMatches(tool.name, "delete|remove|destroy")) return "destructive";
+    if (annotations.readOnlyHint === false || annotations.writeHint === true) return "write";
+    return /^(list|get|search)-/.test(normalizedToolName) ||
+      normalizedToolName === "suggest-edit" ||
+      annotations.readOnlyHint === true
+      ? "read"
+      : "write";
   }
   if (
     sourceTemplateKey === "shopify" &&
@@ -7180,6 +7189,7 @@ export function toolAccessService(
     unavailableServices: string[] = [],
   ): Promise<McpToolDescriptor[]> {
     assertSupportedConnection(connection);
+    await assertConnectorConnectionSetupEnabled(connection);
     let headers = credentialHeaders ?? {
       ...projectedConnectionHeaders(connection),
       ...(await resolveCredentialHeaders(connection, actor)),
@@ -7559,6 +7569,7 @@ export function toolAccessService(
     unavailableServices: string[] = [],
   ): Promise<McpToolDescriptor[]> {
     assertSupportedConnection(connection);
+    await assertConnectorConnectionSetupEnabled(connection);
     if (connection.connectionPurpose === "ai") throw unprocessable("AI connections provide runtime authentication, not tool actions");
     if (isDaytonaConnection(connection)) {
       const headers = credentialHeaders ?? await resolveCredentialHeaders(connection, actor);
@@ -7679,6 +7690,7 @@ export function toolAccessService(
   ): Promise<ToolConnectionHealthCheckResult> {
     const connection = await getConnectionRow(connectionId);
     if (connection.connectionPurpose === "ai") return { connection: toConnection(connection), runtimeSlot: null };
+    await assertConnectorConnectionSetupEnabled(connection);
     const unavailableServices: string[] = [];
     try {
       assertSupportedConnection(connection);
@@ -7826,6 +7838,7 @@ export function toolAccessService(
   ): Promise<ToolCatalogRefreshResult> {
     const connection = await getConnectionRow(connectionId);
     if (connection.connectionPurpose === "ai") throw unprocessable("AI connections do not have a tool catalog");
+    await assertConnectorConnectionSetupEnabled(connection);
     const refreshedAt = now();
     const unavailableServices: string[] = [];
     let descriptors: McpToolDescriptor[];
@@ -7944,9 +7957,8 @@ export function toolAccessService(
       isGoogleWorkspaceConnectorProfileId(googleProfileValue)
         ? googleProfileValue
         : null;
-    const preserveReviewedCatalog =
-      (isRailwayEndpoint(connection.config.url) || sourceTemplateKey === "enterpret" || isDaytonaConnection(connection)) &&
-      existingRows.length > 0;
+    const connectorPolicy = connectorToolPolicy(sourceTemplateKey, connection);
+    const preserveReviewedCatalog = connectorPolicy.quarantineNewEntries && existingRows.length > 0;
     const quarantineOnRefresh =
       (!refreshOptions.enableAllByDefault || preserveReviewedCatalog) &&
       shouldQuarantineNewEntries(connection) &&
@@ -7956,7 +7968,7 @@ export function toolAccessService(
         refreshOptions.quarantineManagedOAuthDraft === true);
     const safeDefault = asRecord(connection.config).safeDefault === true;
     for (const descriptor of descriptors) {
-      const riskLevel = classifyRisk(descriptor, isRailwayEndpoint(connection.config.url) ? "railway" : sourceTemplateKey);
+      const riskLevel = classifyRisk(descriptor, connectorPolicy.sourceTemplateKey);
       const hash = descriptorHash(descriptor, riskLevel);
       const schemaHash = stableHash(descriptor.inputSchema ?? {});
       const existing = existingByName.get(descriptor.name);
@@ -8023,8 +8035,7 @@ export function toolAccessService(
     const catalogByName = new Map(catalogRows.map(row => [row.toolName, row]));
     const updatedEntries = descriptors.map(descriptor => toCatalogEntry(catalogByName.get(descriptor.name)!));
 
-    const preserveQuarantine =
-      isRailwayEndpoint(connection.config.url) || sourceTemplateKey === "enterpret" || isDaytonaConnection(connection);
+    const preserveQuarantine = connectorPolicy.quarantineNewEntries;
     const normalizedConfig = preserveQuarantine
       ? { ...connection.config, quarantineNewEntries: true }
       : refreshOptions.enableAllByDefault
@@ -12141,31 +12152,33 @@ export function toolAccessService(
     initialGrant: typeof connectionGrants.$inferSelect,
     actor?: ActorInfo,
   ) {
-    try {
-      return await refreshManagedGitHubGrantAccessOnce(
-        connection,
-        initialGrant,
-        actor,
-      );
-    } catch (error) {
-      if (
-        !(error instanceof HttpError) ||
-        asRecord(error.details).code !== "github_access_changed"
-      )
-        throw error;
-      const [current] = await db
-        .select()
-        .from(connectionGrants)
-        .where(
-          and(
-            eq(connectionGrants.id, initialGrant.id),
-            eq(connectionGrants.companyId, connection.companyId),
-            eq(connectionGrants.connectionId, connection.id),
-          ),
+    return measureRunPhase("connectors.github.refresh", async () => {
+      try {
+        return await refreshManagedGitHubGrantAccessOnce(
+          connection,
+          initialGrant,
+          actor,
         );
-      if (!current || current.status !== "active") throw error;
-      return refreshManagedGitHubGrantAccessOnce(connection, current, actor);
-    }
+      } catch (error) {
+        if (
+          !(error instanceof HttpError) ||
+          asRecord(error.details).code !== "github_access_changed"
+        )
+          throw error;
+        const [current] = await measureRunPhase("connectors.github.grants", () => db
+          .select()
+          .from(connectionGrants)
+          .where(
+            and(
+              eq(connectionGrants.id, initialGrant.id),
+              eq(connectionGrants.companyId, connection.companyId),
+              eq(connectionGrants.connectionId, connection.id),
+            ),
+          ));
+        if (!current || current.status !== "active") throw error;
+        return refreshManagedGitHubGrantAccessOnce(connection, current, actor);
+      }
+    });
   }
 
   async function refreshManagedGitHubGrantAccessOnce(
@@ -12173,13 +12186,13 @@ export function toolAccessService(
     initialGrant: typeof connectionGrants.$inferSelect,
     actor?: ActorInfo,
   ) {
-    let grant = await refreshOAuthGrantCredentials({
+    let grant = await measureRunPhase("connectors.github.credentials", () => refreshOAuthGrantCredentials({
       companyId: connection.companyId,
       connectionId: connection.id,
       grantId: initialGrant.id,
       actor,
-    });
-    const resolveAccessToken = async () => {
+    }));
+    const resolveAccessToken = async () => measureRunPhase("connectors.github.credentials", async () => {
       const accessRef = grant.credentialSecretRefs.find(
         (ref) => ref.configPath === "oauth.access_token",
       );
@@ -12196,15 +12209,15 @@ export function toolAccessService(
           undefined,
         )
       ).value;
-    };
+    });
     let metadata;
     let accessToken = await resolveAccessToken();
     try {
-      metadata = await loadGitHubGrantMetadata(
+      metadata = await measureRunPhase("connectors.github.repositories", () => loadGitHubGrantMetadata(
         accessToken,
         fetch,
         grant.providerTenant?.github?.appSlug,
-      );
+      ));
     } catch (error) {
       const providerCode =
         error instanceof HttpError ? asRecord(error.details).code : null;
@@ -12212,27 +12225,27 @@ export function toolAccessService(
       // GitHub may invalidate an access token before its recorded expiry. If an
       // expiring token pair exists, rotate it once under the same durable lease
       // and CAS path, then repeat /user before surfacing reconnect-required.
-      grant = await refreshOAuthGrantCredentials({
+      grant = await measureRunPhase("connectors.github.credentials", () => refreshOAuthGrantCredentials({
         companyId: connection.companyId,
         connectionId: connection.id,
         grantId: initialGrant.id,
         forceRefresh: true,
         actor,
-      });
+      }));
       accessToken = await resolveAccessToken();
       try {
-        metadata = await loadGitHubGrantMetadata(
+        metadata = await measureRunPhase("connectors.github.repositories", () => loadGitHubGrantMetadata(
           accessToken,
           fetch,
           grant.providerTenant?.github?.appSlug,
-        );
+        ));
       } catch (retryError) {
         const retryCode =
           retryError instanceof HttpError
             ? asRecord(retryError.details).code
             : null;
         if (retryCode === "oauth_reauthorization_required") {
-          await db
+          await measureRunPhase("connectors.github.grant_write", () => db
             .update(connectionGrants)
             .set({ status: "needs_reauthorization", updatedAt: now() })
             .where(
@@ -12240,13 +12253,13 @@ export function toolAccessService(
                 eq(connectionGrants.id, grant.id),
                 eq(connectionGrants.companyId, grant.companyId),
               ),
-            );
+            ));
         }
         throw retryError;
       }
     }
-    const { updated, previousGitHub } = await db.transaction(async (tx) => {
-      const [currentGrant] = await tx
+    const { updated, previousGitHub } = await measureRunTransaction(db, "connectors.github.refresh", async (tx) => {
+      const [currentGrant] = await measureRunPhase("connectors.github.grant_lock", () => tx
         .select()
         .from(connectionGrants)
         .where(
@@ -12256,7 +12269,7 @@ export function toolAccessService(
           ),
         )
         .for("update")
-        .limit(1);
+        .limit(1));
       if (!currentGrant || currentGrant.status === "revoked")
         throw notFound("GitHub authorization not found");
       const previousGitHub = currentGrant.providerTenant?.github;
@@ -12284,7 +12297,7 @@ export function toolAccessService(
             previousGitHub?.webhookHealth ?? metadata.webhookHealth,
         },
       };
-      const [updated] = await tx
+      const [updated] = await measureRunPhase("connectors.github.grant_write", () => tx
         .update(connectionGrants)
         .set({
           providerTenant,
@@ -12297,7 +12310,7 @@ export function toolAccessService(
             eq(connectionGrants.companyId, grant.companyId),
           ),
         )
-        .returning();
+        .returning());
       if (!updated) throw notFound("GitHub authorization not found");
       return { updated, previousGitHub };
     });
@@ -12312,7 +12325,7 @@ export function toolAccessService(
     if (cloudConnector && subject) {
       const previous = new Set(previousGitHub?.installationIds ?? []);
       const current = new Set(metadata.installationIds);
-      await Promise.all([
+      await measureRunPhase("connectors.github.webhooks", () => Promise.all([
         ...metadata.installationIds.map((installationId) =>
           cloudConnector.setWebhookBinding({
             subject,
@@ -12338,7 +12351,7 @@ export function toolAccessService(
               active: false,
             }),
           ),
-      ]);
+      ]));
     }
     return updated;
   }
@@ -12436,10 +12449,29 @@ export function toolAccessService(
   }
 
   async function assertExperimentalConnectorSetupEnabled(provider: unknown, existing = false) {
-    if (!existing && isMemoryConnectorId(provider)
-      && !(await instanceSettingsService(db).getExperimental()).enableMemoryConnectors) {
+    const app = typeof provider === "string" ? getConnectableAppDefinition(provider) : null;
+    if (!app?.experimentalFeatureKey && (existing || !isMemoryConnectorId(provider))) return;
+    const settings = await instanceSettingsService(db).getExperimental();
+    if (app && !isConnectorFeatureEnabled(app, settings)) {
+      throw forbidden(`${app.name} is unavailable on this instance`, { code: "connector_disabled" });
+    }
+    if (!existing && isMemoryConnectorId(provider) && !settings.enableMemoryConnectors) {
       throw forbidden("Enable memory connectors in Settings → Experimental to set up this connection", { code: "memory_connectors_disabled" });
     }
+  }
+
+  async function assertConnectorConnectionSetupEnabled(connection: { config?: Record<string, unknown>; transportConfig?: Record<string, unknown>; applicationId?: string; companyId?: string; status?: string }, applicationKey?: unknown) {
+    let resolvedApplicationKey = applicationKey;
+    if (resolvedApplicationKey == null && connection.applicationId && connection.companyId) {
+      const [application] = await db.select({ applicationKey: toolApplications.applicationKey })
+        .from(toolApplications).where(and(eq(toolApplications.id, connection.applicationId),
+          eq(toolApplications.companyId, connection.companyId))).limit(1);
+      resolvedApplicationKey = application?.applicationKey;
+    }
+    const marker = connection.config?.sourceTemplateKey ?? connection.transportConfig?.sourceTemplateKey;
+    const app = resolvedApplicationKey != null ? getAppDefinitionForApplicationKey(resolvedApplicationKey)
+      : typeof marker === "string" ? getConnectableAppDefinition(marker) : null;
+    if (app) await assertExperimentalConnectorSetupEnabled(app.slug, connection.status !== "draft");
   }
 
   async function connectGalleryApp(
@@ -12561,6 +12593,7 @@ export function toolAccessService(
       }
     }
 
+    await assertConnectorConnectionSetupEnabled(requestedResumeConnection ?? {}, existingApplication?.applicationKey);
     const requestedName =
       input.name ??
       existingApplication?.name ??
@@ -12765,7 +12798,7 @@ export function toolAccessService(
       }
     }
     const requestedGrantKind =
-      retainedGrantKind ?? input.grantKind ?? "organization";
+      retainedGrantKind ?? input.grantKind ?? (method?.grantKinds?.length === 1 ? method.grantKinds[0]! : "organization");
     if (method?.grantKinds && !method.grantKinds.includes(requestedGrantKind)) {
       throw badRequest(
         `${galleryEntry?.name ?? "This app"} supports only ${method.grantKinds.join(" or ")} credentials`,
@@ -12937,7 +12970,7 @@ export function toolAccessService(
           // Grant-backed setup keeps the full discovered catalog selectable;
           // the wizard projects the app's action defaults into policies at
           // finish time instead of using catalog quarantine as access state.
-          quarantineNewEntries: ["railway", "enterpret", "daytona"].includes(galleryEntry.slug),
+          quarantineNewEntries: connectorToolPolicy(galleryEntry.slug).quarantineNewEntries,
           ...(remoteMcpConnector ? {
             mcpSessionRequired: true,
             mcpAuthMode: input.authMode ?? "auto",
@@ -14062,6 +14095,7 @@ export function toolAccessService(
     actor?: ActorInfo,
   ): Promise<FinishToolAppResult> {
     const connection = await getConnectionRow(connectionId, companyId);
+    await assertConnectorConnectionSetupEnabled(connection);
     if (connection.status === "archived")
       throw conflict("Archived app connections cannot be finished");
     if (connection.config.mcpPreserveAccess === true && isRemoteMcpConnectorMethod(connection.config.sourceTemplateKey, connection.config.connectionMethodKey)) {
@@ -14557,6 +14591,7 @@ export function toolAccessService(
   ): Promise<ToolConnectionHealthCheckResult> {
     const connection = await getConnectionRow(connectionId, companyId);
     assertSupportedConnection(connection);
+    await assertConnectorConnectionSetupEnabled(connection);
     await assertExperimentalConnectorSetupEnabled(connection.config.sourceTemplateKey, connection.status !== "draft");
     if (connection.status === "archived")
       throw conflict("Archived app connections cannot be reconnected");
@@ -14741,6 +14776,7 @@ export function toolAccessService(
   ): Promise<ToolOAuthStartResult> {
     let connection = await getConnectionRow(connectionId, companyId);
     assertSupportedConnection(connection);
+    await assertConnectorConnectionSetupEnabled(connection);
     await assertExperimentalConnectorSetupEnabled(connection.config.sourceTemplateKey, connection.status !== "draft");
     if (connection.status === "archived")
       throw conflict("Archived app connections cannot start sign in");
@@ -16367,6 +16403,7 @@ export function toolAccessService(
       status: connection.status,
       enabled: connection.enabled,
     };
+    await assertConnectorConnectionSetupEnabled(connection);
     const sourceTemplateKey =
       typeof connection.config.sourceTemplateKey === "string"
         ? connection.config.sourceTemplateKey
@@ -18260,9 +18297,9 @@ export function toolAccessService(
       companyId: string,
       userId: string | null,
       localTrusted = false,
-    ) => {
+    ) => measureRunPhase("connectors.github.catalog", async () => {
       const [connections, grants, members, memberships] = await Promise.all([
-        db
+        measureRunPhase("connectors.github.connections", () => db
           .select()
           .from(toolConnections)
           .where(
@@ -18270,17 +18307,17 @@ export function toolAccessService(
               eq(toolConnections.companyId, companyId),
               eq(toolConnections.enabled, true),
             ),
-          ),
-        db
+          )),
+        measureRunPhase("connectors.github.grants", () => db
           .select()
           .from(connectionGrants)
-          .where(eq(connectionGrants.companyId, companyId)),
-        db
+          .where(eq(connectionGrants.companyId, companyId))),
+        measureRunPhase("connectors.github.grant_members", () => db
           .select()
           .from(connectionGrantMembers)
-          .where(eq(connectionGrantMembers.companyId, companyId)),
+          .where(eq(connectionGrantMembers.companyId, companyId))),
         userId
-          ? db
+          ? measureRunPhase("connectors.github.membership", () => db
               .select()
               .from(companyMemberships)
               .where(
@@ -18290,7 +18327,7 @@ export function toolAccessService(
                   eq(companyMemberships.principalId, userId),
                   eq(companyMemberships.status, "active"),
                 ),
-              )
+              ))
           : Promise.resolve([]),
       ]);
       const repositories = new Map<
@@ -18357,8 +18394,8 @@ export function toolAccessService(
               );
               rows = grant.providerTenant?.github?.repositories ?? [];
             } else {
-              const headers = initialGrant
-                ? await (async () => {
+              const headers = await measureRunPhase("connectors.github.credentials", () => initialGrant
+                ? (async () => {
                     const ref = initialGrant.credentialSecretRefs.find(
                       (ref) =>
                         ref.configPath === "oauth.access_token" ||
@@ -18377,8 +18414,8 @@ export function toolAccessService(
                     );
                     return { Authorization: `Bearer ${secret.value}` };
                   })()
-                : await resolveCredentialHeaders(connection, actor);
-              rows = await loadGitHubTokenRepositories(headers);
+                : resolveCredentialHeaders(connection, actor));
+              rows = await measureRunPhase("connectors.github.repositories", () => loadGitHubTokenRepositories(headers));
             }
             for (const row of rows) {
               mergeProjectRepository(repositories, row, connection.name, connection.id);
@@ -18399,7 +18436,7 @@ export function toolAccessService(
         connectionCount,
         failedConnectionCount,
       };
-    },
+    }),
 
     listConnections: async (
       companyId: string,
@@ -18470,6 +18507,7 @@ export function toolAccessService(
       const config = normalizeGoogleSheetsConnectionConfig(
         input.config ?? input.transportConfig ?? {},
       );
+      await assertConnectorConnectionSetupEnabled({ config, applicationId, companyId });
       // Validate company-scoped references before touching a caller-supplied
       // network endpoint. Besides failing fast, this keeps cross-company
       // authorization errors from being masked by DNS or SSRF validation.
@@ -18485,6 +18523,7 @@ export function toolAccessService(
       if (applicationId) {
         const app = await assertApplication(companyId, applicationId);
         applicationNamespace = app.applicationKey ?? app.name;
+        await assertConnectorConnectionSetupEnabled({ config }, applicationNamespace);
         if (
           (transport === "mcp_remote" && app.type !== "mcp_http") ||
           (transport === "local_stdio" && app.type !== "mcp_stdio")
