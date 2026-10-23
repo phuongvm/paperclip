@@ -38,6 +38,8 @@ export const DELIVERY_QUEUES = {
   feedback: "feedback-exports",
   chatCompletion: "chat-completions",
   connection: "connection-continuations",
+  gitRestorePoints: "git-restore-points",
+  nativeWorkspaceSyncRetention: "native-workspace-sync-retention",
   question: "question-responses",
   pluginLifecycle: "plugin-resource-lifecycle",
   toolAction: "tool-action-receipts",
