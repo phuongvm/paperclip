@@ -180,6 +180,10 @@ export const updateAgentSchema = objectWithoutDefaults(
 
 export type UpdateAgent = z.infer<typeof updateAgentSchema>;
 
+export const qualifyAgentRunnerSchema = z.object({
+  expectedEnvironmentId: z.string().uuid(),
+}).strict();
+
 export const updateAgentInstructionsPathSchema = z.object({
   path: z.string().trim().min(1).nullable(),
   adapterConfigKey: z.string().trim().min(1).optional(),

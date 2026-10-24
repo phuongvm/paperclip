@@ -98,6 +98,8 @@ export interface Agent {
   capabilities: string | null;
   adapterType: AgentAdapterType;
   adapterConfig: Record<string, unknown>;
+  /** Non-fatal options ignored by this configuration write; not persisted. */
+  configurationWarnings?: import("../runner-configuration-warnings.js").AgentConfigurationWarning[];
   runtimeConfig: AgentRuntimeConfig;
   defaultEnvironmentId?: string | null;
   budgetMonthlyCents: number;
