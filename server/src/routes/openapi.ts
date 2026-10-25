@@ -48,6 +48,7 @@ import {
   updateAgentSchema,
   updatePrimaryAgentSchema,
   updateAgentPermissionsSchema,
+  addAgentProjectAccessSchema,
   updateAgentInstructionsPathSchema,
   updateAgentInstructionsBundleSchema,
   upsertAgentInstructionsFileSchema,
@@ -1390,6 +1391,8 @@ const browserUseOperations = [
 ] as const;
 
 const BOARD_ONLY_OPERATIONS = new Set([
+  "GET /api/agents/{id}/project-access",
+  "POST /api/agents/{id}/project-access",
   "POST /api/issues/{id}/interactions/{interactionId}/dismiss",
   "POST /api/issues/{id}/retry",
   "GET /api/companies/{companyId}/prompt-injection-prevention",
@@ -3788,6 +3791,26 @@ registry.registerPath({
     body: jsonBody(updateAgentPermissionsSchema),
   },
   responses: { 200: r.ok(), 400: r.badRequest, 401: r.unauthorized },
+});
+
+const agentProjectAccessResponse = z.object({ projectIds: z.array(z.string().uuid()), canManage: z.boolean() });
+registry.registerPath({
+  method: "get",
+  path: "/api/agents/{id}/project-access",
+  tags: ["agents"],
+  summary: "Read an agent's allowed projects and the current operator's management capability",
+  request: { params: z.object({ id: z.string() }) },
+  responses: { 200: r.ok(agentProjectAccessResponse), 401: r.unauthorized, 403: r.forbidden, 404: r.notFound },
+});
+registry.registerPath({
+  method: "post",
+  path: "/api/agents/{id}/project-access",
+  tags: ["agents"],
+  summary: "Add allowed projects without replacing an agent's other permissions",
+  description: "Requires board access and agents:create in the agent's company. Accepts 1 to 100 project IDs. Selected projects must be readable and in that company. Locks the low-trust agent, preserves existing containment, audits new additions, and rejects pending-approval agents or changed trust settings. Repeated additions are idempotent. Saving does not start or retry a task.",
+  request: { params: z.object({ id: z.string() }), body: jsonBody(addAgentProjectAccessSchema) },
+  responses: { 200: r.ok(agentProjectAccessResponse), 400: r.badRequest, 401: r.unauthorized,
+    403: r.forbidden, 404: r.notFound, 409: r.conflict },
 });
 
 registry.registerPath({

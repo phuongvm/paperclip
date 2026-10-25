@@ -98,7 +98,7 @@ import {
   type PullRequestMergeDetailsResolver,
 } from "./github-pull-request-merge.js";
 import { visibleIssueCondition } from "./issue-visibility.js";
-import { createGitRemoteAuthProvider } from "./git-credentials.js";
+import { createIssueGitRemoteAuthProvider } from "./git-credentials.js";
 import { readProjectWorkspaceRuntimeConfig } from "./project-workspace-runtime-config.js";
 import { workspaceGitOperationScheduler } from "./workspace-git-operation-scheduler.js";
 import { isRuntimeOwnedGitBranch } from "./execution-workspace-branch-ownership.js";
@@ -4113,7 +4113,7 @@ export function executionWorkspaceService(db: Db, opts: ExecutionWorkspaceServic
       try { recipe = readGitCacheRestoration(snapshot); }
       catch { return { ok: false, code: "rebuild_failed", message: new GitCacheRestorationFailure().message }; }
       const freshStart = recipe !== null && isClosedExecutionWorkspaceStatus(snapshot.status) && gitRestorePointExpired(recipe);
-      const gitAuth = createGitRemoteAuthProvider(db, snapshot.companyId, { issueId: issue.id });
+      const gitAuth = createIssueGitRemoteAuthProvider(db, snapshot.companyId, issue.id);
       const [
         { ensurePersistedExecutionWorkspaceAvailable },
         { workspaceOperationService },
@@ -4168,9 +4168,7 @@ export function executionWorkspaceService(db: Db, opts: ExecutionWorkspaceServic
                 });
               };
             },
-            resolveGitAuth: createGitRemoteAuthProvider(db, snapshot.companyId, {
-              issueId: issue.id,
-            }),
+            resolveGitAuth: createIssueGitRemoteAuthProvider(db, snapshot.companyId, issue.id),
           });
           resolvedBaseCwd = managedWorkspace.cwd;
         } catch {

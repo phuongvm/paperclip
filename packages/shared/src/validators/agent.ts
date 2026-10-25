@@ -322,6 +322,10 @@ export const updateAgentPermissionsSchema = z.object({
 
 export type UpdateAgentPermissions = z.infer<typeof updateAgentPermissionsSchema>;
 
+export const addAgentProjectAccessSchema = z.object({
+  projectIds: z.array(z.string().uuid()).min(1).max(100),
+}).strict();
+
 export const resolveAgentInstructionCandidateSchema = z.object({
   baseRevisionId: z.string().uuid().nullable(),
   content: z.string().max(1024 * 1024),

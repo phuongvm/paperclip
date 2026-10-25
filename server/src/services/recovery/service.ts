@@ -1,5 +1,6 @@
 import { recoveryRunContextColumn, recoveryRunVersionColumn } from "./run-context-read.js";
 import { recoveryRunResultColumn } from "./run-result-read.js";
+import { readLegacyDispositionSource } from "./legacy-disposition-read.js";
 import { isAgentAwaitingSetup } from "../../modules/agent-lifecycle/index.js";
 import { onboardingFirstTaskAwaitingUserSql } from "./onboarding-first-task-wait.js";
 import { isAiAuthenticationBlocked } from "../ai-auth-failure.js";
@@ -105,6 +106,7 @@ import { issueRecoveryActionService } from "../issue-recovery-actions.js";
 import { hasUnverifiedNativeWorkspaceFinalizationOwner } from "../native-runtime/native-workspace-finalization-recovery-state.js";
 import {
   legacyExecutionNeedsReconciliationWithEvidence,
+  legacyReconciliationRunFields,
   terminalizeLegacyExecution,
 } from "../legacy-execution-recovery.js";
 import { issueTreeControlService } from "../issue-tree-control.js";
@@ -516,6 +518,7 @@ const TRANSIENT_INFRA_CONTINUATION_ERROR_CODES = new Set<string>([
 ]);
 
 const NON_RETRYABLE_CONTINUATION_ERROR_CODES = new Set<string>([
+  "project_access_denied",
   "native_provider_model_rejected",
   "provider_tool_definition_invalid",
   "adapter_engine_unavailable",
@@ -2008,7 +2011,7 @@ export function recoveryService(
   }) {
     if (input.retryOfRunId) {
       const [predecessor] = await db
-        .select()
+        .select(legacyReconciliationRunFields)
         .from(heartbeatRuns)
         .where(
           and(
@@ -3792,9 +3795,9 @@ export function recoveryService(
     episode: LegacyDispositionEpisode,
     dispatchRunId?: string,
   ) {
-    const [run] = await db.select(recoveryRunFields).from(heartbeatRuns).where(and(
-      eq(heartbeatRuns.id, runId), eq(heartbeatRuns.companyId, issue.companyId),
-    )).limit(1);
+    const source = await readLegacyDispositionSource(db, { companyId: issue.companyId, issueId: issue.id, runId });
+    if (source.kind === "skip") return source.decision;
+    const run = source.run;
     if (!run) return { kind: "skip" as const, reason: "missing_run" };
     const context = parseObject(run.contextSnapshot);
     if ((readNonEmptyString(context.issueId) ?? readNonEmptyString(context.taskId)) !== issue.id) {
@@ -3853,7 +3856,9 @@ export function recoveryService(
   }
 
   async function reconcileLegacyContinuation(runId: string) {
-    const [run] = await db.select(recoveryRunFields).from(heartbeatRuns).where(eq(heartbeatRuns.id, runId)).limit(1);
+    const [run] = await db.select(recoveryRunFields).from(heartbeatRuns).where(and(
+      eq(heartbeatRuns.id, runId), not(eq(heartbeatRuns.runtimeMode, "native")), eq(heartbeatRuns.status, "succeeded"),
+    )).limit(1);
     if (!run || run.runtimeMode === "native" || run.status !== "succeeded") return "skipped" as const;
     const context = parseObject(run.contextSnapshot);
     const issueId = readNonEmptyString(context.issueId) ?? readNonEmptyString(context.taskId);
@@ -4805,7 +4810,7 @@ export function recoveryService(
         )
       ) {
         const [source] = await db
-          .select()
+          .select(legacyReconciliationRunFields)
           .from(heartbeatRuns)
           .where(
             and(

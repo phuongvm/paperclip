@@ -104,6 +104,12 @@ Review: `baseline`.
 API: `present` — representative operation IDs:
 
 - `GET /api/agents/{id}/instructions-bundle/file`.
+- `GET /api/agents/{id}/project-access` and `POST /api/agents/{id}/project-access`
+  are board-only. The POST requires `agents:create`, checks selected projects in
+  the same company, and adds IDs under an agent row lock. It preserves existing
+  containment, audits new grants and rejects pending-approval agents. Agent keys
+  cannot use this route to grant themselves access; a read-only board viewer
+  receives `canManage: false`. Saving never creates a run or wakeup.
 - `PUT /api/agents/{id}/instructions-bundle/file`.
 - `PATCH /api/agents/{id}` with an explicit `runner: "paperclip"` upgrade.
 - `POST /api/agents/{id}/qualify-runner` to qualify the saved effective sandbox before upgrading.

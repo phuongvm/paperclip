@@ -206,7 +206,7 @@ describeEmbeddedPostgres("wake-queue postgres adapter", () => {
     return { recorded, rows };
   }
 
-  it("keeps in-flight work and every recovery receipt while omitting output from release reads", async () => {
+  it.each(["legacy", "native"])("keeps %s in-flight work and every recovery receipt while omitting output from release reads", async runtimeMode => {
     const companyId = await seedCompany();
     const agentId = await seedAgent({ companyId });
     const issueId = await seedIssue({ companyId, assigneeAgentId: agentId });
@@ -218,7 +218,10 @@ describeEmbeddedPostgres("wake-queue postgres adapter", () => {
       nativeCancellation: { schema: "paperclip.native-cancellation.v1", runId, companyId, issueId },
       executionCancellation: { state: "acknowledged" }, executionRecovery: { kind: "interrupted", providerStopped: true },
       configurationIncomplete: { reason: "workspace_unavailable" }, unknownFutureReceipt: { retained: true } };
-    await db.update(heartbeatRuns).set({ resultJson: { ...evidence, stdout: payload.repeat(3), stderr: payload } }).where(eq(heartbeatRuns.id, runId));
+    await db.update(heartbeatRuns).set({ runtimeMode,
+      ...(runtimeMode === "native" ? { runnerProfileJson: { savedInput: payload }, stdoutExcerpt: payload, stderrExcerpt: payload,
+        contextSnapshot: { issueId, paperclipWake: { savedTask: payload }, paperclipTaskMarkdown: payload } } : {}),
+      resultJson: { ...evidence, stdout: payload.repeat(3), stderr: payload } }).where(eq(heartbeatRuns.id, runId));
     await db.update(issues).set({ executionRunId: runId, checkoutRunId: runId }).where(eq(issues.id, issueId));
     const [run] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, runId));
     const [issue] = await db.select().from(issues).where(eq(issues.id, issueId));
@@ -230,7 +233,10 @@ describeEmbeddedPostgres("wake-queue postgres adapter", () => {
     );
     expect(result.outcome.kind).toBe("released");
     expect(rows).toHaveLength(1);
-    expect(rows[0]).toEqual([{ ...run, resultJson: evidence }]);
+    expect(rows[0]).toEqual([{ ...run, resultJson: evidence,
+      ...(runtimeMode === "native" ? { runnerProfileJson: null, stdoutExcerpt: null, stderrExcerpt: null,
+        contextSnapshot: { issueId } } : {}) }]);
+    expect(result.run.contextSnapshot).toEqual({ issueId });
     expect(Buffer.byteLength(JSON.stringify(rows))).toBeLessThan(8 * 1024);
     expect((await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, runId)))[0]).toEqual(run);
     expect((await db.select().from(issues).where(eq(issues.id, issueId)))[0]).toEqual(issue);

@@ -291,9 +291,9 @@ export function connectionIntentService(db: Db) {
       && connection.status !== "archived" && connection.connectionPurpose !== "ai"
     );
     if (matching.length === 0) return null;
-    const effective = await access.getEffectiveToolAssignmentsForAgent(input.companyId, input.agentId);
+    const effective = await access.getConnectionAssignmentsForAgent(input.companyId, input.agentId, matching.map(connection => connection.id));
     const installedIds = new Set(effective.installedConnections.map((connection) => connection.id));
-    const permittedIds = new Set(effective.allowedTools.map((tool) => tool.connectionId));
+    const permittedIds = new Set(effective.allowedConnectionIds);
     const usable = (connection: ToolConnection | undefined) => connection
       && installedIds.has(connection.id) && permittedIds.has(connection.id)
       && connection.status === "active" && connection.enabled

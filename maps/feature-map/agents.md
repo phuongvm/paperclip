@@ -41,6 +41,12 @@ existing preparation and verification lifecycle.
 
 Open `/agents/:agentId` and the configuration/instruction surfaces it exposes.
 
+For a low-trust agent, open **Permissions / Trust → Allowed projects**. An operator
+with agent-management permission can select additional projects and explicitly
+save them. Existing projects and other containment restrictions remain intact.
+Cancel discards the draft; a failed save retains it. Reload to verify persistence.
+This does not start or retry a task.
+
 In `/agents/all`, select roster checkboxes and choose **Edit connection & model**.
 A mixed selection offers one action per harness. Each field is opt-in. The editor
 previews each changed value and excludes agents already at the target value.

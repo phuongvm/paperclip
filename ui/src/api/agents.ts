@@ -1,4 +1,5 @@
 import type { AgentPublicIdentity } from "@paperclipai/shared";
+import type { AgentProjectAccess } from "@paperclipai/shared";
 import type {
   Agent,
   EnvironmentProbeResult,
@@ -111,6 +112,8 @@ function agentPath(id: string, companyId?: string, suffix = "") {
 }
 
 export const agentsApi = {
+  projectAccess: (id: string) => api.get<AgentProjectAccess>(`/agents/${id}/project-access`),
+  addProjectAccess: (id: string, projectIds: string[]) => api.post<AgentProjectAccess>(`/agents/${id}/project-access`, { projectIds }),
   qualifyRunner: (id: string, expectedEnvironmentId: string, companyId?: string) =>
     api.post<EnvironmentProbeResult>(agentPath(id, companyId, "/qualify-runner"), { expectedEnvironmentId }),
   setAvatar: (companyId: string, agentId: string, imageBase64: string | null) =>
