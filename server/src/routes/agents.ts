@@ -1,3 +1,4 @@
+import { latestFailedRunsByAgent } from "@paperclipai/shared";
 import { prepareRuntimeSettingsPatch } from "../services/agent-runtime-settings.js";
 import { completeSetupTokenAiConnection } from "../services/setup-token-ai-connection.js";
 import { cancellationRequestId } from "../services/native-runtime/native-cancellation-request.js";
@@ -6,6 +7,7 @@ import { resolveNewAgentRunnerForCompany } from "../services/agent-runner-select
 import { agentEnvironmentTestService } from "../services/agent-environment-test.js";
 import { qualifyAgentRunner } from "../services/agent-runner-qualification.js";
 import { createAgentLifecycle } from "../services/agent-lifecycle.js";
+import { isAgentSetupDraft } from "../modules/agent-lifecycle/index.js";
 
 import { agentIdentityService } from "../services/agent-identity.js";
 import { aiConnectionRouterService, poolMemberRuntimeConfig } from "../services/ai-connection-router.js";
@@ -1796,7 +1798,7 @@ export function agentRoutes(
     id: string; companyId: string; createdByUserId?: string | null; lifecycleState?: string; pauseReason?: string | null;
   }, allowCompleted = false) {
     if (req.actor.type === "board" && req.actor.userId && targetAgent.createdByUserId === req.actor.userId
-      && (allowCompleted || (targetAgent.lifecycleState === "paused" && targetAgent.pauseReason === "setup"))) {
+      && (allowCompleted || isAgentSetupDraft(targetAgent))) {
       await assertCanCreateAgentsForCompany(req, targetAgent.companyId);
       return;
     }
@@ -3180,7 +3182,7 @@ export function agentRoutes(
       const testEnvironmentId = await resolveAdapterTestEnvironmentId(companyId, environmentId, binding.provider === "github");
       if (testEnvironmentId) await assertAdapterTestEnvironmentForCompany(companyId, testEnvironmentId, adapterType);
       const hasSavedAgent = !newAgent || (isUuidLike(agentId) && Boolean(await svc.getById(agentId)));
-      if (!hasSavedAgent && !test && testEnvironmentId && (await environmentsSvc.getById(testEnvironmentId))?.driver === "plugin") {
+      if (newAgent && !test && testEnvironmentId && (await environmentsSvc.getById(testEnvironmentId))?.driver === "plugin") {
         // The lifecycle verifies the saved agent after its plugin can create the agent-owned computer.
         return { connectionId: selection.connection.id };
       }
@@ -3228,7 +3230,7 @@ export function agentRoutes(
         if (savedAgent.companyId !== companyId) throw notFound("Agent not found");
         await assertCanConfigureAgentSetup(req, savedAgent);
       }
-      const testingSetup = savedAgent?.lifecycleState === "paused" && savedAgent.pauseReason === "setup";
+      const testingSetup = savedAgent ? isAgentSetupDraft(savedAgent) : false;
       const poolBinding = requestedBinding ?? (savedAgent?.runtimeConfig?.aiConnection ? aiRuntimeConnectionBindingSchema.parse(savedAgent.runtimeConfig.aiConnection) : undefined);
       const requestedEnvironmentId = await resolveAdapterTestEnvironmentId(
         companyId,
@@ -5545,7 +5547,7 @@ export function agentRoutes(
         && (["openai_dot", "muse"].includes(String(rawEffectiveAdapterConfig.provider)) || ["openai_dot", "muse"].includes(String(existingRunnerProvider)))) {
         await assertSelectableAdapterType(requestedAdapterType, rawEffectiveAdapterConfig);
       }
-      if (!(existing.lifecycleState === "paused" && existing.pauseReason === "setup") && (
+      if (!isAgentSetupDraft(existing) && (
         changingAdapterType ||
         (requestedAdapterType === "paperclip_runner" &&
           (requestedAdapterConfig !== null ||
@@ -5580,7 +5582,7 @@ export function agentRoutes(
     }
     const nextAiConfig = (patchData.adapterConfig ?? existing.adapterConfig) as Record<string, unknown>;
     if (existing.runtimeConfig.aiConnection && requestedRuntimeConfig && !requestedRuntimeConfig.aiConnection
-      && !(existing.lifecycleState === "paused" && existing.pauseReason === "setup")) {
+      && !isAgentSetupDraft(existing)) {
       const existingBinding = aiRuntimeConnectionBindingSchema.safeParse(existing.runtimeConfig.aiConnection).data;
       if (existingBinding && agentHarnessType(existing.adapterType, existing.adapterConfig) === agentHarnessType(requestedAdapterType, nextAiConfig)
         && (existingBinding.mode === "router" || isAiConnectionCompatible(existingBinding,
@@ -5589,7 +5591,7 @@ export function agentRoutes(
       }
     }
     if (!requestedRuntimeConfig?.aiConnection && !existing.runtimeConfig.aiConnection
-      && !(existing.lifecycleState === "paused" && existing.pauseReason === "setup")
+      && !isAgentSetupDraft(existing)
       && requestedAdapterType === "paperclip_runner" && nextAiConfig.provider === "acpx"
       && nextAiConfig.acpxAgent === "copilot"
       && (touchesAdapterConfiguration || Object.prototype.hasOwnProperty.call(patchData, "defaultEnvironmentId"))) {
@@ -5605,7 +5607,7 @@ export function agentRoutes(
       const copilotConfigurationChanged = requestedAdapterType === "paperclip_runner" && aiConfig.provider === "acpx" && aiConfig.acpxAgent === "copilot"
         && (touchesAdapterConfiguration || Object.prototype.hasOwnProperty.call(patchData, "defaultEnvironmentId"));
       if (runtimeSettings || changed || copilotConfigurationChanged || (nextAiBinding.mode === "router" && requestedAdapterType !== existing.adapterType)) {
-        const configuringSetup = existing.lifecycleState === "paused" && existing.pauseReason === "setup";
+        const configuringSetup = isAgentSetupDraft(existing);
         await validateManagedAgentBinding(req, existing.companyId, existing.id, requestedAdapterType, aiConfig, nextAiBinding,
           (patchData.defaultEnvironmentId !== undefined ? patchData.defaultEnvironmentId : existing.defaultEnvironmentId) as string | null,
           !configuringSetup && (!runtimeSettings || changed), configuringSetup, Boolean(runtimeSettings));
@@ -5683,7 +5685,7 @@ export function agentRoutes(
     const id = req.params.id as string;
     const existing = await getAccessibleAgent(req, res, id);
     if (!existing) return;
-    await assertCanUpdateAgent(req, existing);
+    await assertCanConfigureAgentSetup(req, existing);
     const agent = await svcLifecycle.retry(id);
     if (!agent) { res.status(404).json({ error: "Agent not found" }); return; }
     const actor = getActorInfo(req);
@@ -6910,7 +6912,8 @@ export function agentRoutes(
       ? Math.max(1, Math.min(HEARTBEAT_RUN_LIST_MAX_LIMIT, parseInt(limitParam, 10) || HEARTBEAT_RUN_LIST_DEFAULT_LIMIT))
       : HEARTBEAT_RUN_LIST_DEFAULT_LIMIT;
     const summary = req.query.summary === "true" || req.query.summary === "1";
-    const runs = await heartbeat.list(companyId, agentId, limit, { summary });
+    const recentRuns = await heartbeat.list(companyId, agentId, limit, { summary });
+    const runs = req.query.latestFailuresOnly === "true" ? latestFailedRunsByAgent(recentRuns) : recentRuns;
     const readDecisions = await getHeartbeatRunReadDecisions(db, access, req.actor, runs);
     res.json(await runRedactions.redactForRuns(companyId, runs.map((run, index) =>
       readDecisions[index] ? run : redactHeartbeatRunListRow(run)),
@@ -7558,7 +7561,11 @@ export function agentRoutes(
 
     const afterSeq = Number(req.query.afterSeq ?? 0);
     const limit = Number(req.query.limit ?? 200);
-    const events = await heartbeat.listEvents(runId, Number.isFinite(afterSeq) ? afterSeq : 0, Number.isFinite(limit) ? limit : 200);
+    const cursor = Number.isFinite(afterSeq) ? afterSeq : 0;
+    const pageLimit = Number.isFinite(limit) ? limit : 200;
+    const events = await (req.query.view === "conversation"
+      ? heartbeat.listEvents(runId, cursor, pageLimit, true)
+      : heartbeat.listEvents(runId, cursor, pageLimit));
     const currentUserRedactionOptions = await getCurrentUserRedactionOptions();
     const redactedEvents = events.map((event) =>
       redactCurrentUserValue({
@@ -7578,13 +7585,22 @@ export function agentRoutes(
 
     const offset = Number(req.query.offset ?? 0);
     const limitBytes = readRunLogLimitBytes(req.query.limitBytes);
-    const result = await heartbeat.readLog(run, {
-      offset: Number.isFinite(offset) ? offset : 0,
-      limitBytes,
-    });
+    const controller = new AbortController();
+    const cancelRead = () => controller.abort();
+    res.once("close", cancelRead);
+    try {
+      const result = await heartbeat.readLog(run, {
+        offset: Number.isFinite(offset) ? offset : 0,
+        limitBytes,
+        ...(req.query.alignStartToRecord === "true" ? { alignStartToRecord: true } : {}),
+        signal: controller.signal,
+      });
 
-    res.set("Cache-Control", "no-cache, no-store");
-    res.json(await runRedactions.redactForRun(run.companyId, run.id, result));
+      res.set("Cache-Control", "no-cache, no-store");
+      res.json(await runRedactions.redactForRun(run.companyId, run.id, result));
+    } finally {
+      res.off("close", cancelRead);
+    }
   });
 
   router.get("/heartbeat-runs/:runId/workspace-operations", async (req, res) => {

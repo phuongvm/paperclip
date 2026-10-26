@@ -33,6 +33,10 @@ Agent access: [companion](../agent-access-map/recovery.md).
   workspace link when the destination is disabled. Local PostgreSQL and real
   filesystem regressions cover native and legacy recovery and one-time delivery;
   hosted provider recovery remains separate acceptance.
+  Native finalization deadline failures also retain the exact prepared source
+  for the same stop-and-save workflow before Retry admits another executor.
+  Retry reconstructs missing preservation for historical failures only from an
+  exact prepared source without a live finalization owner.
 - `unknown-outcome`: `recovery/unknown-outcome` — uncertain external side effects require inspection and
   an explicit decision, not automatic replay.
 - `user-continuation`: `recovery/user-continuation` — saved user messages after a stop are reconsidered once
@@ -53,6 +57,12 @@ A workspace project denial names the blocked access and links to the agent's
 project, return to the saved task for an explicit **Retry task** action. Saving
 permissions alone does not wake the agent. Historical setup denials receive the
 same notice on reload; unrelated errors and prior assignees do not.
+Move a denied task to a project the agent can access while retaining a source
+from another project: the notice must stay blocked until the selected source is
+also allowed or an authorized workspace selection replaces it. A valid pending
+selection is checked for the next admission; a stale or unavailable selection
+must show a non-retryable failure without a project-permission repair action.
+Project changes alone preserve selected files.
 
 Thinking appears immediately after Retry, before the request completes.
 Technical source/run details remain in deliberate diagnostics. The
@@ -82,6 +92,14 @@ The connected-chat database regression in
 [chat channel integration](../../server/src/__tests__/chat-channels.integration.test.ts)
 exercises admission and queue continuation. It does not establish hosted
 provider recovery or successful delivery.
+
+For GitHub, save a follow-up behind a failed run, then reconnect the same App.
+Click ordinary Retry and verify that one successor receives the saved follow-up
+instead of replaying the older request. Reload and repeat the same request key;
+there must be one successor and no duplicate publication. A second reconnect
+after admission, changed App, revoked sender or changed repository must prevent
+dispatch. An unadmitted rejection keeps the follow-up available for another
+deliberate Retry. Historical deliveries must remain unchanged.
 
 ### `post-stop-message`
 
@@ -169,12 +187,27 @@ provider restart. For that journey, interrupt a disposable deployment after
 workspace preparation and before its first executor claim, then confirm one
 provider turn starts on the original run through the normal admission gates.
 
+The [Runner transport regressions](../../packages/paperclip-runner/runner/crates/runner-core/src/durable/transport.rs)
+exercise a real WebSocket welcome delayed beyond two seconds. Authentication
+uses the ten-second connection setup budget, clipped by the current lifecycle
+deadline. The cases also retain failed-welcome ticket fencing, identity checks,
+and reconnect replay without repeated provider effects. These transport cases
+do not establish hosted provider acceptance.
+
 Active remote process supervision distinguishes a failed health read from a
 confirmed exit. The [executor tests](../../server/src/services/native-runtime/native-session-executor.test.ts)
 exercise timeout recovery with a real listening process, unchanged ownership,
 and rejected identity evidence. The Runner restart tests require positive exit
-evidence before replacement. This coverage does not prove recovery of a
+evidence before replacement. The executor regressions also retire a real child
+during its metadata read, keep unknown adopted-process ownership held, and reject
+launch before detachment when Node is unavailable. The diagnostic tests cover
+permission failures and generation-bound zombie receipts. This coverage does not prove recovery of a
 historical retained sandbox or behavior during a live provider outage.
+The [transport regression](../../packages/paperclip-runner/src/live/runnerd-codex-transport.test.ts)
+also retains a real authenticated Runner and its journal when its close probe
+rejects, without signalling it, checkpointing it, or starting a replacement.
+The failed close still retires its local connections, event timers and
+notification stream. Repeated close cannot report successful retirement.
 
 For a release change during a remote provider session, verify that reattachment
 uses the controller's admitted pack manifest and runner digest. Check useful
@@ -235,6 +268,21 @@ recovery checks on the source task. Full run-detail navigation remains a manual
 gap.
 
 ### `operator-retry`
+
+The [workspace recovery regression](../../server/src/services/workspace-recovery.test.ts)
+uses the real Retry producer and a quiet delivery coordinator. It checks that a
+committed request starts one physical source preservation, duplicate Retry keeps
+the active owner's receipt valid, and startup reconstructs a resolved files-only
+obligation without provider replay. The [execution-control lifecycle suite](../../server/src/__tests__/execution-control-work.test.ts)
+checks independent finalization, stored deadlines, and a bounded pass through
+completed obligations followed by quiet paused input.
+The physical export regression holds one export while another completes, then
+verifies a third Retry can use the free slot and shutdown joins the held work.
+These local checks do not prove recovery of a deployed allocation.
+The historical deadline case starts without preservation bookkeeping, holds the
+provider stop reply, and verifies that HTTP Retry cannot admit a successor until
+the real temporary files are restored. Duplicate requests then admit one queued
+turn. GitHub and Telegram admission also retain the exact pending recovery.
 
 Automated: [disposition notices](../../ui/src/components/DispositionRecoveryNotice.test.tsx)
 tests pending/error/gated states and waiting for the real retry acknowledgement.

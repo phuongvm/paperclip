@@ -3010,7 +3010,7 @@ export function buildHostServices(
       async getRuntime(params) {
         const companyId = ensureCompanyId(params.companyId);
         await ensurePluginAvailableForCompany(companyId);
-        return pluginAgentRuntimeState(db, pluginId, companyId, params.agentId);
+        return pluginAgentRuntimeState(db, pluginId, companyId, params.agentId, params.environmentId, params.installEnvironmentSkills);
       },
       async list(params) {
         const companyId = ensureCompanyId(params.companyId);

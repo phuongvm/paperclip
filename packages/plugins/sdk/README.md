@@ -259,6 +259,18 @@ A card or section rendered on the main dashboard. Use this for at-a-glance metri
 
 An additional tab on a project, issue, agent, goal, or run detail page. Rendered when the user navigates to that entity's detail view. Receives `PluginDetailTabProps` with `context.companyId` set to the active company and `context.entityId` / `context.entityType` guaranteed to be non-null, so you can immediately scope data fetches to the relevant entity. Specify which entity types the tab applies to via the `entityTypes` array in the manifest slot declaration. Requires the `ui.detailTab.register` capability.
 
+Agent detail tabs can also appear in task side panels. Add
+`taskSidePanel: { availabilityPath: "/agents/:entityId/view/availability" }` to the
+slot and declare that exact path as a board-only GET API route with
+`companyResolution: { from: "agent", param: "entityId" }`. The route returns
+`{ available: true }` only while its view is in use. The host replaces `:entityId`
+with the task's running agent ID, polls availability and mounts the same component
+with agent context. The plugin owns availability, labels, content and controls.
+No private plugin identifier or provider protocol belongs in Core. Unavailable
+views, access failures, inactive runs and missing plugins contribute no task tab.
+Closing a tab preserves dismissal during polling; available panels remain in the
+launcher. Only tab identity is persisted, never availability responses or secrets.
+
 #### `taskDetailView`
 
 A specialized slot rendered in the context of a task or issue detail view. Similar to `detailTab` but designed for inline content within the task detail layout rather than a separate tab. Receives `context.companyId`, `context.entityId`, and `context.entityType` like `detailTab`. Requires the `ui.detailTab.register` capability.

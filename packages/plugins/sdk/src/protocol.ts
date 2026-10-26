@@ -2153,7 +2153,7 @@ export interface WorkerToHostMethods {
     result: PluginAgentRuntimeIdentity | null,
   ];
   "agents.getRuntime": [
-    params: { agentId: string; companyId: string },
+    params: { agentId: string; companyId: string; environmentId?: string; installEnvironmentSkills?: boolean },
     result: PluginAgentRuntimeState | null,
   ];
   "agents.get": [

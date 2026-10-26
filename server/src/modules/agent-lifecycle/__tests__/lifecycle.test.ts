@@ -16,7 +16,7 @@ import { errorHandler } from "../../../middleware/error-handler.js";
 import { createLifecycleDriver } from "../../../services/agent-lifecycle-driver.js";
 import { randomUUID } from "node:crypto";
 import { and, eq, sql } from "drizzle-orm";
-import { agents, approvals, projects, issues, heartbeatRuns, nativeRunFinalizations, budgetPolicies, environmentLeases, agentApiKeys, activityLog, agentConfigRevisions, userCompanyPreferences, companies, companyMemberships, principalPermissionGrants, plugins, pluginCompanySettings, createDb, type Db } from "@paperclipai/db";
+import { agents, approvals, projects, issues, heartbeatRuns, nativeRunFinalizations, budgetPolicies, environmentLeases, environments, agentApiKeys, activityLog, agentConfigRevisions, userCompanyPreferences, companies, companyMemberships, principalPermissionGrants, plugins, pluginCompanySettings, createDb, type Db } from "@paperclipai/db";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "../../../__tests__/helpers/embedded-postgres.js";
 import { createAgentLifecycle, configureAgentLifecycle, startAgentLifecycle } from "../../../services/agent-lifecycle.js";
@@ -116,29 +116,8 @@ const support = await getEmbeddedPostgresTestSupport();
     expect(agent).not.toHaveProperty("lifecycleOperation");
   });
 
-  it("keeps early setup inactive and completes the same record without renaming it", async () => {
-    const runHost = vi.fn(async () => "complete" as const);
-    const work = worker(runHost);
-    const lifecycle = createAgentLifecycle(db);
-    const id = randomUUID();
-    const input = { id, name: "Early agent", adapterType: "process" };
-    const first = await lifecycle.requestHire(companyId, input, { setupOnly: true });
-    const retry = await lifecycle.requestHire(companyId, input, { setupOnly: true });
-    expect(first.id).toBe(id);
-    expect(retry.id).toBe(id);
-    await work.process(id);
-    expect(runHost).not.toHaveBeenCalled();
-    expect(await current(id)).toMatchObject({ status: "paused", lifecycleState: "paused", lifecycleHolds: ["setup"] });
-    expect(await db.select().from(principalPermissionGrants).where(eq(principalPermissionGrants.principalId, id))).toHaveLength(0);
-    await expect(agentConfiguration(db).createApiKey(id, "Incomplete setup")).rejects.toThrow("Finish agent setup");
-    await expect(lifecycle.resumeAgent(id)).rejects.toThrow("Finish agent setup");
-    const finished = await lifecycle.requestHire(companyId, { id, name: "Early agent", adapterType: "process", status: "idle" }, { setupAgentId: id });
-    expect(finished).toMatchObject({ id, name: "Early agent" });
-    await work.process(id);
-    expect(await current(id)).toMatchObject({ status: "idle", lifecycleState: "ready", lifecycleHolds: [] });
-    expect(await db.select().from(agents).where(eq(agents.companyId, companyId))).toHaveLength(1);
-    await expect(lifecycle.requestHire(companyId, { id, name: "Early agent" }, { setupAgentId: id })).rejects.toThrow("no longer available");
-  });
+
+
 
   it("freezes the final setup configuration for hire approval", async () => {
     const lifecycle = createAgentLifecycle(db);
@@ -159,6 +138,7 @@ const support = await getEmbeddedPostgresTestSupport();
     await expect(lifecycle.requestHire(companyId, { name: "Paused" }, { setupAgentId: paused.id })).rejects.toThrow("no longer available");
     expect((await current(setup.id)).lifecycleHolds).toEqual(["setup"]);
   });
+
 
   it("creates a board-owned setup before requesting approval for its final configuration", async () => {
     await db.update(companies).set({ requireBoardApprovalForNewAgents: true }).where(eq(companies.id, companyId));

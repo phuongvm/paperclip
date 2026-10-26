@@ -1,3 +1,5 @@
+import { writeExecutionControl } from "./execution-control-notifications.js";
+import { DELIVERY_QUEUES } from "./delivery-work-notifications.js";
 import { z } from "zod";
 import { randomUUID } from "node:crypto";
 import { and, desc, eq, inArray, or, sql } from "drizzle-orm";
@@ -5,9 +7,26 @@ import { agentWakeupRequests, chatActions, chatConversations, chatEndpoints, hea
 import { conflict, forbidden, notFound } from "../errors.js";
 import { persistActivity } from "./activity-log.js";
 import { createSystemRecovery, readSystemRecovery } from "./system-recovery-state.js";
-import { updateSystemRecovery } from "./system-recovery.js";
+import { adoptSystemRecovery, updateSystemRecovery } from "./system-recovery.js";
 import { instanceSettingsService } from "./instance-settings.js";
 import { notifyChatActionWork } from "./chat-work-notifications.js";
+import { authorizationService } from "./authorization.js";
+import { preserveNativeFailedWorkspace } from "./native-runtime/native-failed-workspace-recovery.js";
+import { NativeWorkspaceFinalizationBusyError } from "./native-runtime/native-workspace-finalization-ownership.js";
+import { hasRequiredWorkspaceRecovery } from "./workspace-restore-recovery-state.js";
+
+export async function taskRetryMutationAllowed(db: Db, input: {
+  companyId: string; issueId: string; actorId: string; actorSource: TaskRetryIntent["actorSource"];
+}) {
+  const [issue] = await db.select({ status: issues.status, assigneeAgentId: issues.assigneeAgentId,
+    assigneeUserId: issues.assigneeUserId }).from(issues).where(and(eq(issues.companyId, input.companyId), eq(issues.id, input.issueId)));
+  if (!issue) return false;
+  const permission = await authorizationService(db).decide({
+    actor: { type: "board", userId: input.actorId, source: input.actorSource }, action: "issue:mutate",
+    resource: { type: "issue", companyId: input.companyId, issueId: input.issueId, ...issue },
+  });
+  return permission.allowed;
+}
 
 export async function assertTaskRetryConversationAllowed(
   db: Db,
@@ -59,7 +78,7 @@ export async function requestTaskRetry(input: {
   prepareChatRetry?: (tx: Db, scope: { companyId: string; issueId: string; agentId: string;
     failedRunId: string; initiatedByUserId: string; retryIntentId?: string }) => Promise<{ actionId: string }>;
 }) {
-  return input.db.transaction(async tx => {
+  return writeExecutionControl(input.db, DELIVERY_QUEUES.workspaceRecovery, async tx => {
     const db = tx as unknown as Db;
     const [issue] = await tx.select().from(issues).where(and(eq(issues.companyId, input.companyId),
       eq(issues.id, input.issueId))).for("update");
@@ -100,9 +119,22 @@ export async function requestTaskRetry(input: {
       active = undefined;
     }
     const busy = ["queued", "running", "scheduled_retry"].includes(latest.status);
+    if (!busy) {
+      // Historical deadline failures can predate their preservation record.
+      // Register the exact prepared source; this proves neither a stopped
+      // executor nor permission to replay its work.
+      try { await preserveNativeFailedWorkspace(db, latest); }
+      catch (error) { if (!(error instanceof NativeWorkspaceFinalizationBusyError)) throw error; }
+    }
     const records = await tx.select().from(issueRecoveryActions).where(and(
       eq(issueRecoveryActions.companyId, issue.companyId), eq(issueRecoveryActions.sourceIssueId, issue.id),
       sql`${issueRecoveryActions.evidence}->>'runId' = ${latest.id}`)).for("update");
+    for (let index = 0; !busy && index < records.length; index++) {
+      const action = records[index];
+      if (!hasRequiredWorkspaceRecovery(action.evidence) || readSystemRecovery(action.evidence)) continue;
+      await adoptSystemRecovery(db, { companyId: issue.companyId, issueId: issue.id, runId: latest.id, actionId: action.id });
+      [records[index]] = await tx.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.id, action.id));
+    }
     // An unadmitted request can outlive its exhausted repair. A new deliberate
     // click replaces that generation; a replay of the same key returned above.
     if (active && !busy && !active.runId && records.some(action =>
@@ -115,6 +147,7 @@ export async function requestTaskRetry(input: {
     const intent: TaskRetryIntent = { schema: "paperclip.task-retry.v1", generationId: active?.id ?? id,
       sourceRunId: latest.id, actorId: input.actorId,
       actorSource: taskRetryIntentSchema.shape.actorSource.parse(input.actorSource ?? "session"), strategy: "evaluate",
+      ...(active && activeIntent?.chatActionId ? { chatActionId: activeIntent.chatActionId } : {}),
       ...(active ? { canonicalIntentId: active.id } : {}) };
     // Preserve external chat authority through its existing admission owner.
     // Generic board Retry must never manufacture a chat-inbound request.
@@ -139,6 +172,11 @@ export async function requestTaskRetry(input: {
       for (const action of records) {
         const previous = readSystemRecovery(action.evidence);
         if (!previous || previous.state === "complete") continue;
+        if (previous.state === "running") {
+          await updateSystemRecovery(db, { companyId: issue.companyId, issueId: issue.id, runId: latest.id,
+            actionId: action.id }, previous, { ...previous, intentId: active?.id ?? id });
+          continue;
+        }
         // Active repair keeps its attempt and cooldown. An exhausted generation
         // gets a new budget only because this click is a new durable intent.
         const next = previous.state === "exhausted"
@@ -148,8 +186,7 @@ export async function requestTaskRetry(input: {
           : { ...previous, revision: previous.revision + 1, intentId: active?.id ?? id,
             // Retry may advance our backoff, never a provider's cooldown and
             // never an operation whose physical owner is still running.
-            nextAttemptAt: previous.state === "running" ? previous.nextAttemptAt
-              : Math.max(Date.now(), previous.providerCooldownAt ?? 0) };
+            nextAttemptAt: Math.max(Date.now(), previous.providerCooldownAt ?? 0) };
         if (next.generationId !== previous.generationId) await persistActivity(db, {
           companyId: issue.companyId, actorType: "system", actorId: "task-retry", entityType: "issue", entityId: issue.id,
           action: "issue.recovery_generation_replaced", runId: latest.id,

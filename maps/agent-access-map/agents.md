@@ -50,11 +50,22 @@ permission. Its creator can finish their own inactive setup with that permission
 changing another person's setup requires configuration permission.
 Creation retries reuse only records owned by the caller. Returning a completed
 record also requires the normal agent-read and configuration-read checks.
-An unfinished record stays paused with a
+An unfinished record keeps compatibility status `paused` with a
 `setup` hold and cannot receive API keys or authenticate with keys or JWTs.
 Its standard grants apply at hire. Authorized completion retries recover the
 same record and approval without changing the submitted configuration.
 Normal agent-authored hiring keeps its existing approval policy.
+
+An agent-owned plugin may prepare the draft and leave its lifecycle in
+`verifying` while that setup hold remains. Only bounded Core-issued setup probes
+can run there. The creator's company creation permission also covers configuring
+and retrying their draft during preparation or stopping; other actors still require the
+ordinary configuration permission. This is a board wizard path, not new agent
+execution or probe authority. Lifecycle and component regressions cover these
+transitions; no permitted-agent or live-provider journey is claimed here.
+Companies requiring hire approval keep drafts paused and allocate no agent-owned
+resource before approval. Selecting an account there is pending verification,
+not approval or execution authority.
 
 The creation boundary resolves the request-level runner before adapter validation
 and credential normalization. Omitted/automatic new Codex selection uses the

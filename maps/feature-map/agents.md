@@ -37,6 +37,14 @@ Save & exit keeps its configuration; Finish setup on the agent returns to the
 same record. Final submission requests approval when required, then follows the
 existing preparation and verification lifecycle.
 
+Agent-owned plugin environments prepare the saved draft in the background when
+their driver declares `requiresAgent`. The draft waits in `verifying` with its
+setup hold until hiring finishes. Changing environments keeps the selected
+account and Configure step, saves the selection, and invalidates its test.
+Preparation and failed-save retries remain visible without reconnecting.
+Companies requiring hire approval save the account with pending verification;
+resource allocation waits for approval.
+
 ### `agent-configuration`
 
 Open `/agents/:agentId` and the configuration/instruction surfaces it exposes.
@@ -87,6 +95,14 @@ Preconditions: follow the [baseline](./README.md#before-driving-a-journey). Use 
 
 Automated: [new agent page](../../ui/src/pages/NewAgent.test.tsx) and [configuration form](../../ui/src/components/AgentConfigForm.render.test.tsx) cover mocked UI behavior.
 
+For an agent-owned plugin environment, verify preparation before connecting,
+same-agent probes, account preservation after an environment change, failed
+selection-save retry, and switching back while the computer stops. Confirm the
+setup hold still blocks ordinary work and API key creation before finishing.
+The [setup lifecycle tests](../../server/src/modules/agent-lifecycle/__tests__/setup.test.ts)
+exercise durable transitions with synthetic plugin resources; they do not prove
+live VM provisioning.
+
 Manual: Hire an agent with a distinct name and role. Complete any required approval, reload the roster, and open its configuration. Confirm manager, adapter, and model persisted; run a small task to prove execution readiness.
 
 For a new Codex hire, choose the Codex harness. Automatic selection uses Paperclip
@@ -127,6 +143,14 @@ from the hiring picker; API fixture creation does not prove this UI journey.
 ### `agent-configuration`
 
 Automated: [instruction service](../../server/src/__tests__/agent-instructions-service.test.ts) and [instruction revisions](../../server/src/__tests__/agent-instruction-revisions.test.ts) cover file/revision contracts.
+
+The [AI account field regression](../../ui/src/components/ai-connections/AiConnectionField.test.tsx)
+checks duplicate provider names, account identity in choices and adoption confirmation,
+the exact selected grant, and disabled unavailable accounts with authorized metadata fixtures.
+Manually compare a personal API key and shared subscription with the same name in
+Harness / Runtime. Confirm their method, scope and available identity before saving.
+Reload the saved choice and verify the next eligible task uses it; labels alone
+do not establish credential validity or change account access.
 
 Manual: Save a harmless instruction edit, reload, and verify its revision and effect in the next eligible run. Pause and resume the disposable agent; confirm pause prevents new work and does not erase previous runs.
 
