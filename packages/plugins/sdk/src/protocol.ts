@@ -289,6 +289,7 @@ export type PluginRpcErrorCode =
  */
 export interface PluginInvocationScope {
   companyId: string;
+  projectGit?: { projectId: string; workspaceId?: string; runId?: string; agentId?: string; operation?: "prepare" | "inspect" | "remove" };
 }
 
 /**
@@ -1795,6 +1796,10 @@ export interface WorkerToHostMethods {
   "projects.list": [
     params: { companyId: string; limit?: number; offset?: number },
     result: Project[],
+  ];
+  "projects.resolveGitCredential": [
+    params: { projectId: string; workspaceId: string; companyId: string },
+    result: string | null,
   ];
   "projects.getInstanceSecrets": [
     params: { projectId: string; companyId: string },

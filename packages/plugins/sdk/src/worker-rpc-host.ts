@@ -720,6 +720,9 @@ export function startWorkerRpcHost(options: WorkerRpcHostOptions): WorkerRpcHost
       },
 
       projects: {
+        async resolveGitCredential(projectId, workspaceId, companyId) {
+          return callHost("projects.resolveGitCredential", { projectId, workspaceId, companyId });
+        },
         async list(input) {
           return callHost("projects.list", {
             companyId: input.companyId,

@@ -19,6 +19,9 @@ Agent access: [companion](../agent-access-map/recovery.md).
   progress, and next action without requiring a raw-log interpretation.
 - `bounded-continuation`: `recovery/bounded-continuation` — supported interrupted work continues with preserved
   conversation context and bounded attempts, without blindly replaying tools.
+  Restart recovery respects live heartbeat preparation before workspace
+  synchronization finishes. PostgreSQL regressions cover unchanged ownership,
+  no duplicate dispatch, and later recovery after preparation leaves the registry.
 - `source-action`: `recovery/source-action` — source-scoped recovery actions remain attached to the task;
   independent repair work may have its own issue and return owner.
 - `exhaustion`: `recovery/exhaustion` — an exhausted infrastructure attempt offers ordinary Retry.
@@ -37,10 +40,16 @@ Agent access: [companion](../agent-access-map/recovery.md).
   for the same stop-and-save workflow before Retry admits another executor.
   Retry reconstructs missing preservation for historical failures only from an
   exact prepared source without a live finalization owner.
+  New messages and orphan cleanup can register missing preservation automatically
+  and wake the existing worker. Saved input still waits for verified stop and file
+  persistence, then enters ordinary admission once.
 - `unknown-outcome`: `recovery/unknown-outcome` — uncertain external side effects require inspection and
   an explicit decision, not automatic replay.
 - `user-continuation`: `recovery/user-continuation` — saved user messages after a stop are reconsidered once
   cleanup proves the old execution is stopped; duplicate wakes are avoided.
+  A user comment that also reassigns the task retains this intent, including
+  existing deferred assignment receipts. The comment's identity and author,
+  current assignment, stop proof and normal execution gates remain required.
 - `reconnect`: `recovery/reconnect` — browser stream recovery refreshes persisted state without claiming
   the agent itself restarted or that a failed run succeeded.
 
@@ -72,12 +81,24 @@ fresh workspaces, bounded retries, historical adoption and service incidents.
 ### `run-detail`
 
 Open the agent's run (`/agents/:agentId/runs/:runId`) from activity or the task's
-run link. The run page hosts workspace recovery controls only for a failed run
+run link. The run page hosts workspace repair controls only for a failed run
 with error code `workspace_validation_failed` and a linked source task that still
 has a live `workspace_validation` recovery action. Use the source task for other
-stopped-run recovery checks.
+stopped-run recovery checks. Native workspace export failures also offer the
+read-only **Inspect recovery** control described in the
+[run diagnostic recipe](activity.md#activity-audit-1). It observes one selected
+source's recorded identity and does not retry, repair, or authorize execution.
 
 ### `operator-retry`
+
+The [connected-task regression](../../server/src/__tests__/chat-channels.integration.test.ts)
+uses HTTP Retry after an accepted board message fails before provider startup.
+It checks the canonical intent, same-user identity and actual queue dispatch,
+then repeats Retry after another contained preparation failure with the same
+source and a new certified successor;
+edited source, contradictory execution evidence and mismatched receipts refuse
+or wait. This local boundary probe deliberately stops before a provider call,
+so it does not establish hosted recovery of the task.
 
 Use the task's Retry action. It can create an isolated attempt after old execution
 is contained even when old-file preservation remains unresolved. Approval,
@@ -100,6 +121,15 @@ there must be one successor and no duplicate publication. A second reconnect
 after admission, changed App, revoked sender or changed repository must prevent
 dispatch. An unadmitted rejection keeps the follow-up available for another
 deliberate Retry. Historical deliveries must remain unchanged.
+Repeat with legacy input that has no saved App ID and was refused by a budget
+before acknowledgement. An earlier processed response from the same endpoint,
+conversation and agent can prove its App claim. Missing, late, unlinked or
+conflicting proof must reject Retry. Verify actual execution separately.
+At dispatch, confirm the admitted successor retains the same source and resolved
+continuation receipt. If it fails at Retry authorization before provider startup,
+use the next ordinary Retry against that newest failed run. It must retain the
+saved follow-up and create one successor; output, an allocated environment or an
+active controller must prevent treating that failure as never started.
 
 ### `post-stop-message`
 
@@ -147,7 +177,7 @@ Use these checks alongside the entry-point recipes below and the operation recor
 
 | Capability ID | Action and persisted result | Denial, race and retry checks |
 | --- | --- | --- |
-| `recovery/diagnosis` | Open the source task and exact run; compare cause, source action, original owner, recovery owner, attempt bounds and next action after reload. | Test an unrelated/private task and a stale run notice. Read-side retirement of a stale action must not create a new attempt, participant, or permission to replay. |
+| `recovery/diagnosis` | Open the source task and exact run; compare cause, source action, original owner, recovery owner, attempt bounds and next action after reload. | Test an unrelated/private task and a stale run notice. Read-side retirement of a stale action must not create a new attempt, participant, or permission to replay. After workspace recovery, compare task and run instructions; recovered files must not leave instructions to repair a retained sandbox. The stopped run keeps its replay hold until continuation admission. An obsolete exact-session notice retires only after terminal coordinator proof and a separate exact-run workspace hold; no new execution or file cleanup follows. |
 | `recovery/bounded-continuation` | Use a deterministic recoverable interruption and inspect the original run/session, attempt receipts, saved result and eventual useful output. | Repeat restart/receipt delivery, race Stop or a new owner, and retain unknown external outcomes. Accepted completion/finalization recovery must not start a new provider turn or repeat its side effect. |
 | `recovery/source-action` | Inspect active and retained actions, follow the repair owner, and resolve one eligible source-bound action with its exact ID. | Retry the settled resolution and reject a stale/foreign action. Recovery ownership alone cannot mutate the source task; inspect source status, audit and wake independently. |
 | `recovery/exhaustion` | Exhaust or age a bounded fixture; use the currently offered retry once, then inspect its durable acknowledgement and actual continuation. | Reassign, pause, stop, close, add an unresolved dependency, or impose a budget hold before retry. The old notice must not reopen terminal work or run the wrong owner. |
@@ -193,6 +223,12 @@ uses the ten-second connection setup budget, clipped by the current lifecycle
 deadline. The cases also retain failed-welcome ticket fencing, identity checks,
 and reconnect replay without repeated provider effects. These transport cases
 do not establish hosted provider acceptance.
+
+The [native provider regression](../../packages/paperclip-runner/runner/crates/runner-core/tests/native_provider_backend.rs)
+sends malformed activity from a real ACPX sidecar process. It checks a structured
+transport error, one failed terminal, a closed session, and no provider reopening.
+It proves the error contract and retained failure boundary, not the cause of a
+historical provider outage or successful hosted task recovery.
 
 Active remote process supervision distinguishes a failed health read from a
 confirmed exit. The [executor tests](../../server/src/services/native-runtime/native-session-executor.test.ts)

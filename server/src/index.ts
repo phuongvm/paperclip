@@ -1,3 +1,12 @@
+import { registerDecisionArchiveDeliveryWork } from "./services/decision-archive-delivery-work.js";
+
+import { registerToolReviewProjectionWork } from "./services/tool-review-projection-work.js";
+import { registerToolReviewInterruptionWork } from "./services/tool-review-interruption-work.js";
+import { registerToolReviewRecoveryWork } from "./services/tool-review-recovery-work.js";
+import { registerToolReviewExpiryWork } from "./services/tool-review-expiry-work.js";
+import { registerGatewayCredentialExpiryWork } from "./services/gateway-credential-expiry-work.js";
+import { registerSecretProposalExpiryWork } from "./services/secret-proposal-expiry-work.js";
+import { registerCustomImageCleanupWork } from "./services/custom-image-cleanup-work.js";
 import { registerWorkspaceRecoveryWork } from "./services/workspace-recovery-work.js";
 import { registerEnvironmentCleanupWork } from "./services/environment-cleanup-work.js";
 import { loginCleanupSchedule } from "./services/login-cleanup-state.js";
@@ -85,6 +94,7 @@ import detectPort from "detect-port";
 import { createApp } from "./app.js";
 import { loadConfig } from "./config.js";
 import { logger } from "./middleware/logger.js";
+import { createIncompleteTaskWatchdogScanReporter } from "./services/task-watchdog-diagnostics.js";
 import { setStartupRecoveryPhase } from "./startup-recovery-state.js";
 import {
   StartupRefusalError,
@@ -927,6 +937,9 @@ async function startServerWithDatabaseTeardown(
     }
   };
   const pluginWorkerManager = createPluginWorkerManager();
+  const reportIncompleteWatchdogScans = createIncompleteTaskWatchdogScanReporter(
+    (details, message) => logger.warn(details, message),
+  );
   const heartbeat = config.heartbeatSchedulerEnabled
     ? heartbeatService(db as any, { pluginWorkerManager })
     : null;
@@ -1457,8 +1470,34 @@ async function startServerWithDatabaseTeardown(
       }));
   };
 
-  await timeStartupRecovery("tool_reviews", () => app.locals.toolGateway.sweepActionReviews()).catch((err: unknown) => logger.error({ err }, "startup tool review recovery failed"));
-  await timeStartupRecovery("gateway_sessions", () => app.locals.toolGateway.cleanupExpiredSessions()).catch((err: unknown) => logger.error({ err }, "startup gateway token cleanup failed"));
+  await timeStartupRecovery("tool_reviews", async () => {
+    if (config.heartbeatSchedulerEnabled) {
+      await registerToolReviewExpiryWork(deliveryWork, app.locals.toolGateway,
+        () => !isIdleTaskDrainActive() && !heartbeatSchedulerStopped && !isWarmStandby()).ready;
+    } else {
+      await app.locals.toolGateway.sweepExpiredActionReviews();
+    }
+    if (config.heartbeatSchedulerEnabled) {
+      await registerToolReviewRecoveryWork(deliveryWork, app.locals.toolGateway,
+        () => !isIdleTaskDrainActive() && !heartbeatSchedulerStopped && !isWarmStandby()).ready;
+    } else {
+      await app.locals.toolGateway.recoverApprovedActionReviews();
+    }
+    if (config.heartbeatSchedulerEnabled) {
+      await registerToolReviewInterruptionWork(deliveryWork, app.locals.toolGateway,
+        () => !isIdleTaskDrainActive() && !heartbeatSchedulerStopped && !isWarmStandby()).ready;
+    } else {
+      await app.locals.toolGateway.settleInterruptedActionReviews();
+    }
+    return config.heartbeatSchedulerEnabled
+      ? registerToolReviewProjectionWork(deliveryWork, { sweep: app.locals.toolGateway.repairActionReviewProjections, companies: app.locals.toolGateway.actionReviewProjectionCompanies },
+        () => !isIdleTaskDrainActive() && !heartbeatSchedulerStopped && !isWarmStandby()).ready
+      : app.locals.toolGateway.repairActionReviewProjections();
+  }).catch((err: unknown) => logger.error({ err }, "startup tool review recovery failed"));
+  await timeStartupRecovery("gateway_sessions", () => config.heartbeatSchedulerEnabled
+    ? registerGatewayCredentialExpiryWork(deliveryWork, app.locals.toolGateway,
+      () => !isIdleTaskDrainActive() && !heartbeatSchedulerStopped && !isWarmStandby()).ready
+    : app.locals.toolGateway.cleanupExpiredSessions()).catch((err: unknown) => logger.error({ err }, "startup gateway token cleanup failed"));
   await timeStartupRecovery("delivery_workers", () => Promise.all([budgetEnforcementWorker, accountingWorker, fastResponseWorker, ...deliveryWorkers].map(worker => worker.ready)));
   scheduleGitHubConnectionEventPoll();
   scheduleGitHubConnectionContinuitySweep();
@@ -1733,6 +1772,7 @@ async function startServerWithDatabaseTeardown(
         }
 
         const taskWatchdogsReconciled = await heartbeat.reconcileTaskWatchdogs();
+        reportIncompleteWatchdogScans(taskWatchdogsReconciled, "startup");
         if (taskWatchdogsReconciled.triggered > 0) {
           logger.warn(
             { ...taskWatchdogsReconciled },
@@ -1771,8 +1811,7 @@ async function startServerWithDatabaseTeardown(
         });
         archived += await retentionExecutor.autoArchive({ companyId: company.id, items: page.items });
       }
-      const notifications = await retentionExecutor.deliverNotifications();
-      return { archived, ...notifications };
+      return { archived };
     };
     // Startup housekeeping: provider and connection sweeps that every timer tick
     // repeats and that neither serving requests nor run recovery depends on.
@@ -1785,12 +1824,11 @@ async function startServerWithDatabaseTeardown(
         work().catch((err: unknown) => {
           logger.error({ err, startupStep: name }, "startup housekeeping step failed");
         });
-      await step("custom_image_setup_cleanup", async () => {
-        const setupCleanup = await environmentCustomImages.cleanupExpiredSetupSessions();
-        if (setupCleanup.timedOut > 0 || setupCleanup.failed > 0) {
-          logger.warn({ ...setupCleanup }, "startup environment customImage setup cleanup changed sessions");
-        }
-      });
+      await step("secret_proposal_expiry", () => registerSecretProposalExpiryWork(deliveryWork, secretProposals,
+        () => !isIdleTaskDrainActive() && !heartbeatSchedulerStopped && !isWarmStandby()).ready);
+      await step("custom_image_setup_cleanup", () => registerCustomImageCleanupWork(deliveryWork, environmentCustomImages,
+        () => !isIdleTaskDrainActive() && !isWarmStandby() && !heartbeatSchedulerStopped,
+        config.heartbeatSchedulerIntervalMs).ready);
       await step("tool_connection_health", async () => {
         const toolHealthSweep = await tools.sweepConnectionHealth();
         if (toolHealthSweep.failed > 0) {
@@ -1806,6 +1844,8 @@ async function startServerWithDatabaseTeardown(
       // Retry any orphan sandbox teardown left by a failed acquire before a
       // server restart, so a leaked sandbox does not stay allocated.
       await step("environment_lease_cleanup", startEnvironmentCleanup);
+      await step("archive_notification_worker", () => registerDecisionArchiveDeliveryWork(deliveryWork, retentionExecutor,
+        () => !isIdleTaskDrainActive() && !isWarmStandby() && !heartbeatSchedulerStopped).ready);
       await step("retention_sweep", runRetentionSweep);
     };
 
@@ -1873,18 +1913,6 @@ async function startServerWithDatabaseTeardown(
         }));
 
         if (isIdleTaskDrainActive() || heartbeatSchedulerStopped) return;
-        trackHeartbeatSchedulerWork(environmentCustomImages
-          .cleanupExpiredSetupSessions()
-          .then((result) => {
-            if (result.timedOut > 0 || result.failed > 0) {
-              logger.warn({ ...result }, "environment customImage setup cleanup changed sessions");
-            }
-          })
-          .catch((err) => {
-            logger.error({ err }, "environment customImage setup cleanup failed");
-          }));
-
-        if (isIdleTaskDrainActive() || heartbeatSchedulerStopped) return;
         trackHeartbeatSchedulerWork(tools
           .sweepConnectionHealth()
           .then((swept) => {
@@ -1895,17 +1923,6 @@ async function startServerWithDatabaseTeardown(
           .catch((err) => {
             logger.error({ err }, "periodic tool connection health sweep failed");
           }));
-
-        trackHeartbeatSchedulerWork(secretProposals.sweepExpired()
-          .then((expired) => {
-            if (expired > 0) logger.warn({ expired }, "periodic secret proposal expiry scrubbed proposals");
-          })
-          .catch((err) => {
-            logger.error({ err }, "periodic secret proposal expiry sweep failed");
-          }));
-
-        trackHeartbeatSchedulerWork(app.locals.toolGateway.sweepActionReviews().catch((err: unknown) => logger.error({ err }, "tool review recovery failed")));
-        trackHeartbeatSchedulerWork(app.locals.toolGateway.cleanupExpiredSessions().catch((err: unknown) => logger.error({ err }, "gateway token cleanup failed")));
 
         if (isIdleTaskDrainActive() || heartbeatSchedulerStopped) return;
         if (!(await heartbeat.resolveSchedulingSuppression()).suppressed) {
@@ -1940,6 +1957,7 @@ async function startServerWithDatabaseTeardown(
             })
             .then(async () => {
               const reconciled = await heartbeat.reconcileTaskWatchdogs();
+              reportIncompleteWatchdogScans(reconciled, "periodic");
               if (reconciled.triggered > 0) {
                 logger.warn({ ...reconciled }, "periodic task-watchdog reconciliation triggered watchdog work");
               }

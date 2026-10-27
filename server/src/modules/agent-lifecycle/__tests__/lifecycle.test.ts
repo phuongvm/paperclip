@@ -48,6 +48,24 @@ const support = await getEmbeddedPostgresTestSupport();
   async function hire(status = "idle") { return createAgentLifecycle(db).requestHire(companyId, { name: "Agent", status, adapterType: "process" }); }
   async function current(id: string) { return (await db.select().from(agents).where(eq(agents.id, id)))[0]!; }
 
+  it.each((["codex", "claude"] as const).flatMap(provider => ["direct", "setup", "approval"].map(path => [provider, path] as const)))("defaults a newly hired %s agent on a warm task environment to warm execution through %s", async (provider, path) => {
+    const pluginId = randomUUID(), environmentId = randomUUID();
+    await db.insert(plugins).values({ id: pluginId, pluginKey: pluginId, packageName: "warm-hire-fixture", version: "1.0.0", status: "ready",
+      manifestJson: { capabilities: ["environment.drivers.register"], environmentDrivers: [{ driverKey: "tasks", supportsTasks: true, warmTaskVersion: 1 }] } as never });
+    await db.insert(environments).values({ id: environmentId, name: `Warm computer ${environmentId}`, driver: "plugin",
+      config: { pluginKey: pluginId, driverKey: "tasks", driverConfig: {} } });
+    const adapterConfig = provider === "claude" ? { provider: "acpx", acpxAgent: "claude", model: "claude-sonnet-4-6", lifecycleMode: "per_turn" }
+      : { provider: "codex", model: "gpt-5.6-luna", lifecycleMode: "per_turn" };
+    const lifecycle = createAgentLifecycle(db);
+    const input = { name: "Warm hire", adapterType: "paperclip_runner", adapterConfig, defaultEnvironmentId: environmentId };
+    const draft = path === "setup" ? await lifecycle.requestHire(companyId, input, { setupOnly: true }) : null;
+    const hired = await lifecycle.requestHire(companyId, { ...input, ...(path === "approval" ? { status: "pending_approval" } : {}) }, draft ? { setupAgentId: draft.id } : undefined);
+    if (path === "approval") await lifecycle.approveHire(hired.id, "board");
+    expect((await current(hired.id)).adapterConfig).toMatchObject({ ...adapterConfig, lifecycleMode: "warm" });
+    await createAgentLifecycle(db).updateConfiguration(hired.id, { adapterConfig: { ...(await current(hired.id)).adapterConfig, lifecycleMode: "per_turn" } });
+    expect((await current(hired.id)).adapterConfig.lifecycleMode).toBe("per_turn");
+  });
+
   it("rejects an outdated configuration snapshot under the write lock", async () => {
     const agent = await hire();
     const snapshot = await current(agent.id);

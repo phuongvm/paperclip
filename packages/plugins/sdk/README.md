@@ -1444,3 +1444,32 @@ lifecycle inbox listings or the company secret catalog. Do not expose values
 through plugin entities, state, data handlers, UI, or logs. Agent instance
 secrets retain their existing lifecycle contract. Back up the tenant's existing
 local secrets master key together with its database.
+
+### Project Git credentials
+
+Trusted workspace providers can declare `projects.git-credentials` and call
+`ctx.projects.resolveGitCredential(projectId, workspaceId, companyId)` from the
+matching host-issued project lifecycle or workspace operation. Other invocations
+cannot obtain credentials through this method. The workspace must be a current
+repository in that project and company; plugins cannot supply arbitrary URLs.
+
+Background work uses a project writer's explicit consent to their own personal,
+company-installed GitHub Connector grant. It does not retain task context. Core
+checks the exact grant and its owner's active company membership on every use.
+Foreground preparation uses the active run's identity and trust policy instead.
+Public repositories return null and require no connection. Private repositories
+without authorization wait before provisioning. Repository visibility comes from
+the Connector catalog and retained project selections; legacy URL-only sources
+use anonymous discovery when visibility is unknown. A revoked or invalid private
+repository authorization fails closed. There is no fallback to another grant.
+Project consent follows the connection's current repository access, including
+sources added later, rather than a separate project repository approval list.
+The consenting user must retain project read access, and background credential
+export requires the project's existing trust policy to allow standard execution.
+Archived projects keep credential access only for host-issued workspace inspection
+and removal with existing consent; provisioning remains blocked.
+
+The return value is transient raw credential material with the Connector's
+existing permissions. This capability is for trusted execution infrastructure,
+not agent-facing tools or UI. Never expose or persist it. See
+[GitHub identity](../../../doc/execution-github-identity.md#project-authorization-for-background-repository-work).
