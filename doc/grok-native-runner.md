@@ -17,9 +17,20 @@ Grok Build's qualified harness does not require the `enableNativeRunner` flag.
 
 Explicit thinking effort uses `reasoningEffort` (`minimal`, `low`, `medium`,
 `high`, or `xhigh`). The immutable v10 execution input, provider descriptor,
-and recovery identity bind this value as `grokEffort`. Before a prompt, the
-Runner applies ACP `reasoning_effort` and requires Grok to acknowledge the exact
-value. Missing configuration, a rejected value, or effort drift stops admission.
+and recovery identity bind this value as `grokEffort`. The Grok provider boundary
+adds native `_meta.modelId` and `_meta.reasoningEffort` to session create, load,
+and resume requests before transport writes and observation. Grok 1.0.13 reports
+the selected effort in `_meta["x.ai/sessionConfig"].options`; it does not support
+the standard `session/set_config_option` effort API. The Runner checks that native
+acknowledgement and the effective model before a prompt. A lazy restored handle
+must connect through read-only native session inspection first. Reapplying the
+bound metadata on restore prevents Grok from resetting effort to its default.
+Missing configuration, a rejected value, or effort drift stops admission.
+Admission failures keep a closed Grok reason code through the sidecar boundary.
+Other startup failures retain their closed admission stage when no more specific
+known error code is available. These diagnostics contain no native payload,
+credential, arbitrary provider message, or workspace path. They do not change
+admission or retry policy.
 Omitting effort retains Grok's provider default. This setting remains outside
 the model-visible task prompt. Historical execution inputs retain their schemas.
 
@@ -55,6 +66,16 @@ download. The built-in launcher is identified as `builtin:grok-acp` version 1;
 its native runtime identity is `native:grok` version 1.0.13. The historical
 `agentServerPackage`/`agentRuntimePackage` wire fields carry these identities,
 not npm dependencies. Existing npm-backed ACP bridges retain their package pins.
+
+Grok runs as launch profile 20. Its `commandDigest` attests the upstream
+release: the SHA-256 of `launcher.cjs`, which admission hashes before launch. It
+changes only when the launcher bytes change. Runner source compatibility is
+guarded at the pack boundary by the provider pack's `contractDigest`, so the
+controller reuses an installed pack only when that digest matches and stages its
+current verified pack otherwise. Earlier profile versions decode for recovery,
+but they do not authorize a fresh launch. After changing the launcher, run
+`pnpm --filter @paperclipai/paperclip-runner generate:acpx-profiles`; the
+`check:acpx-profiles` build gate refuses a stale digest.
 
 Provision Grok Build 1.0.13 at
 `/opt/paperclip/providers/grok/1.0.13/grok` in the selected execution environment.

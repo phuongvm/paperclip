@@ -455,6 +455,7 @@ impl VerifiedProcessLaunch {
         }
     }
 
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     pub(crate) fn spawn_stdio(
         &self,
         environment: &std::collections::BTreeMap<String, String>,
@@ -1045,6 +1046,8 @@ impl SupervisedProcess {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
         for key in [
+            "PAPERCLIP_RUNTIME_NOTIFICATION_CONTEXT",
+            "PAPERCLIP_RUNTIME_NOTIFICATION_HELPER",
             "PATH",
             "PATHEXT",
             "SystemRoot",

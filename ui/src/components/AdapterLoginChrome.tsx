@@ -51,6 +51,7 @@ export const CONNECT_SOURCE_NAMES: Record<string, string> = {
   codex_local: "OpenAI",
   grok_local: "Grok",
   hermes_local: "Hermes",
+  antigravity_runtime: "Google",
 };
 
 /** The provider name for a source, falling back to the type when unlisted. */
@@ -424,7 +425,7 @@ export function ProviderSubscriptionCard({
 }: {
   providerName: string;
   authorizationUrl?: string;
-  mode: "submitted_code" | "displayed_code";
+  mode: "submitted_code" | "displayed_code" | "browser_redirect";
   loading?: boolean;
   children: ReactNode;
 }) {
@@ -441,7 +442,8 @@ export function ProviderSubscriptionCard({
           >
             Sign in to {providerName}
           </a>
-          {mode === "submitted_code"
+          {mode === "browser_redirect" ? " then return here"
+            : mode === "submitted_code"
             ? " then come back and enter authorization code"
             : " by providing the authorization code below"}
         </>
@@ -470,15 +472,15 @@ export function ProviderApiKeyCard({
 /** Shared instructions for local subscription setup in every authentication host. */
 export function LocalProviderLoginInstructions({ adapterType, login }: {
   adapterType: string;
-  login?: { isolated?: boolean; command?: string; authorizationUrl?: string | null; code?: string | null; submitCode?: (code: string) => Promise<void>; preparing: boolean; status?: "ready" | "sign_in_required" | "expired" | null; error: string | null; retry: () => void };
+  login?: { isolated?: boolean; command?: string; authorizationUrl?: string | null; code?: string | null; accountLabel?: string | null; submitCode?: (code: string) => Promise<void>; preparing: boolean; status?: "ready" | "sign_in_required" | "expired" | null; error: string | null; retry: () => void };
 }) {
   const [showCommand, setShowCommand] = useState(false);
   const [browserCode, setBrowserCode] = useState("");
   const [submitting, setSubmitting] = useState(false);
-  const provider = adapterType === "claude_local" ? "Claude Code" : adapterType === "grok_local" ? "Grok CLI" : adapterType === "hermes_local" ? "Hermes" : "Codex CLI";
+  const provider = adapterType === "antigravity_runtime" ? "Google Antigravity" : adapterType === "claude_local" ? "Claude Code" : adapterType === "grok_local" ? "Grok CLI" : adapterType === "hermes_local" ? "Hermes" : "Codex CLI";
   const isolated = login?.isolated ?? (adapterType === "codex_local" || adapterType === "grok_local");
   const command = login?.command;
-  const browserLogin = adapterType === "claude_local" || adapterType === "codex_local";
+  const browserLogin = adapterType === "claude_local" || adapterType === "codex_local" || adapterType === "antigravity_runtime";
   async function submitBrowserCode() {
     if (!browserCode.trim() || !login?.submitCode || submitting) return;
     setSubmitting(true);
@@ -495,14 +497,14 @@ export function LocalProviderLoginInstructions({ adapterType, login }: {
   const ready = login?.status === "ready";
   return <div className="min-w-0 max-w-full space-y-3 text-sm text-muted-foreground">
     {ready ? <>
-      <p role="status" className="flex items-center gap-2 text-foreground"><Check className="size-4 shrink-0 text-(--status-task-icon-done)" />{provider} is signed in. Click Connect to use this account.</p>
+      <p role="status" className="flex items-center gap-2 text-foreground"><Check className="size-4 shrink-0 text-(--status-task-icon-done)" />{login?.accountLabel ?? provider} is signed in. Click Connect to use this account.</p>
       {!showCommand && <button type="button" className="underline underline-offset-4" onClick={() => browserLogin ? login?.retry() : setShowCommand(true)}>Use a different account</button>}
     </> : !browserLogin && <p>{isolated ? `Sign in to ${provider} for this connection on the machine running Paperclip. Your existing terminal login stays separate.` : `Connect uses your local ${provider} account on the machine running Paperclip.`}</p>}
     {browserLogin && !ready && !login?.authorizationUrl && !login?.error && <p role="status">Preparing browser sign-in…</p>}
     {browserLogin && !ready && !login?.error && login?.authorizationUrl && <ProviderSubscriptionCard
       providerName={connectSourceName(adapterType)}
       authorizationUrl={login.authorizationUrl}
-      mode={adapterType === "claude_local" ? "submitted_code" : "displayed_code"}
+      mode={adapterType === "antigravity_runtime" ? "browser_redirect" : adapterType === "claude_local" ? "submitted_code" : "displayed_code"}
     >
       {adapterType === "claude_local" ? <div className="flex flex-col gap-2">
         <OnboardingCardField
@@ -512,7 +514,7 @@ export function LocalProviderLoginInstructions({ adapterType, login }: {
           disabled={submitting}
         />
         <Button type="button" disabled={!browserCode.trim() || submitting} onClick={() => void submitBrowserCode()}>Submit code</Button>
-      </div> : <OnboardingLoginCodeRow code={login.code ?? ""} />}
+      </div> : adapterType === "antigravity_runtime" ? <p>Finish signing in in the Google browser window, then return here.</p> : <OnboardingLoginCodeRow code={login.code ?? ""} />}
     </ProviderSubscriptionCard>}
     {!browserLogin && (!ready || showCommand) && !login?.error && <>
       <p>Run this in a terminal on that machine and finish signing in in your browser. We’ll check automatically when you return.</p>
