@@ -128,7 +128,7 @@ test("testEnvironment does not warn about missing API keys when Hermes config pr
       companyId: "company-test",
       adapterType: "hermes_local",
       config: {
-        hermesCommand: "python3",
+        hermesCommand: process.execPath,
         model: "openrouter/gpt-4.1-mini",
       },
     });
@@ -151,7 +151,7 @@ test("testEnvironment describes provider-omitted runtime config without inventin
       companyId: "company-test",
       adapterType: "hermes_local",
       config: {
-        hermesCommand: "python3",
+        hermesCommand: process.execPath,
         model: "oca/gpt-5.4",
       },
     });
@@ -175,7 +175,7 @@ test("testEnvironment does not warn about missing API keys when Hermes config pr
       companyId: "company-test",
       adapterType: "hermes_local",
       config: {
-        hermesCommand: "python3",
+        hermesCommand: process.execPath,
         model: "oca/gpt-5.4",
       },
     });

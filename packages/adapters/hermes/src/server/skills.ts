@@ -50,36 +50,46 @@ function parseSkillFrontmatter(content: string): SkillFrontmatter {
 async function scanHermesSkills(
   skillsHome: string,
 ): Promise<AdapterSkillEntry[]> {
-  const entries: AdapterSkillEntry[] = [];
-
   try {
     const categories = await fs.readdir(skillsHome, { withFileTypes: true });
-    for (const cat of categories) {
-      if (!cat.isDirectory()) continue;
-      const catPath = path.join(skillsHome, cat.name);
+    const nested = await Promise.all(
+      categories
+        .filter((cat) => cat.isDirectory())
+        .map(async (cat) => {
+          const catEntries: AdapterSkillEntry[] = [];
+          const catPath = path.join(skillsHome, cat.name);
 
-      // Check if the category directory itself has a SKILL.md (top-level skill)
-      const topLevelSkillMd = path.join(catPath, "SKILL.md");
-      if (await fs.stat(topLevelSkillMd).catch(() => null)) {
-        entries.push(await buildSkillEntry(cat.name, topLevelSkillMd, cat.name));
-      }
+          // Check if the category directory itself has a SKILL.md (top-level skill)
+          const topLevelSkillMd = path.join(catPath, "SKILL.md");
+          if (await fs.stat(topLevelSkillMd).catch(() => null)) {
+            catEntries.push(await buildSkillEntry(cat.name, topLevelSkillMd, cat.name));
+          }
 
-      // Scan for sub-skills
-      const items = await fs.readdir(catPath, { withFileTypes: true }).catch(() => []);
-      for (const item of items) {
-        if (!item.isDirectory()) continue;
-        const skillMd = path.join(catPath, item.name, "SKILL.md");
-        if (await fs.stat(skillMd).catch(() => null)) {
-          const key = item.name;
-          entries.push(await buildSkillEntry(key, skillMd, `${cat.name}/${item.name}`));
-        }
-      }
-    }
+          // Scan for sub-skills
+          const items = await fs.readdir(catPath, { withFileTypes: true }).catch(() => []);
+          const subEntries = await Promise.all(
+            items
+              .filter((item) => item.isDirectory())
+              .map(async (item) => {
+                const skillMd = path.join(catPath, item.name, "SKILL.md");
+                if (await fs.stat(skillMd).catch(() => null)) {
+                  return buildSkillEntry(item.name, skillMd, `${cat.name}/${item.name}`);
+                }
+                return null;
+              }),
+          );
+          for (const sub of subEntries) {
+            if (sub) catEntries.push(sub);
+          }
+          return catEntries;
+        }),
+    );
+    const entries = nested.flat();
+    return entries.sort((a, b) => a.key.localeCompare(b.key));
   } catch {
     // ~/.hermes/skills/ doesn't exist — no skills available
+    return [];
   }
-
-  return entries.sort((a, b) => a.key.localeCompare(b.key));
 }
 
 async function buildSkillEntry(

@@ -12,7 +12,7 @@ import type {
 } from "@paperclipai/adapter-utils";
 
 import { execFile } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { promisify } from "node:util";
 
@@ -26,16 +26,29 @@ function asString(v: unknown): string | undefined {
   return typeof v === "string" ? v : undefined;
 }
 
+function buildExecEnv(config: Record<string, unknown>): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = { ...process.env };
+  const envConfig =
+    config.env && typeof config.env === "object" && !Array.isArray(config.env)
+      ? (config.env as Record<string, unknown>)
+      : {};
+  for (const [key, value] of Object.entries(envConfig)) {
+    if (typeof value === "string") env[key] = value;
+  }
+  return env;
+}
+
 // ---------------------------------------------------------------------------
 // Checks
 // ---------------------------------------------------------------------------
 
 async function checkCliInstalled(
   command: string,
+  env: NodeJS.ProcessEnv,
 ): Promise<AdapterEnvironmentCheck | null> {
   try {
     // Try to run the command to see if it exists
-    await execFileAsync(command, ["--version"], { timeout: 10_000 });
+    await execFileAsync(command, ["--version"], { timeout: 10_000, env });
     return null; // OK — it ran successfully
   } catch (err: unknown) {
     const e = err as NodeJS.ErrnoException;
@@ -55,10 +68,12 @@ async function checkCliInstalled(
 
 async function checkCliVersion(
   command: string,
+  env: NodeJS.ProcessEnv,
 ): Promise<AdapterEnvironmentCheck | null> {
   try {
     const { stdout } = await execFileAsync(command, ["--version"], {
       timeout: 10_000,
+      env,
     });
     const version = stdout.trim();
     if (version) {
@@ -84,11 +99,57 @@ async function checkCliVersion(
   }
 }
 
-async function checkPython(): Promise<AdapterEnvironmentCheck | null> {
-  for (const candidate of ["python3", "python"]) {
+function discoverManagedPythonCandidates(config: Record<string, unknown>): string[] {
+  const candidates: string[] = [];
+  try {
+    const hermesHome = resolveHermesHome(config);
+    const toolsDir = join(hermesHome, "tools");
+    if (existsSync(toolsDir)) {
+      for (const entry of readdirSync(toolsDir, { withFileTypes: true })) {
+        if (!entry.isDirectory() || !entry.name.startsWith("python-")) continue;
+        const winPy = join(toolsDir, entry.name, "python.exe");
+        const posixPy = join(toolsDir, entry.name, "bin", "python3");
+        if (existsSync(winPy)) candidates.push(winPy);
+        if (existsSync(posixPy)) candidates.push(posixPy);
+      }
+    }
+  } catch {
+    // ignore discovery errors
+  }
+  return candidates;
+}
+
+async function checkPython(
+  config: Record<string, unknown>,
+  env: NodeJS.ProcessEnv,
+  cliVersionMessage?: string,
+): Promise<AdapterEnvironmentCheck | null> {
+  const embeddedMatch = cliVersionMessage?.match(/Python:\s*(\d+)\.(\d+)/i);
+  if (embeddedMatch) {
+    const major = parseInt(embeddedMatch[1], 10);
+    const minor = parseInt(embeddedMatch[2], 10);
+    if (major < 3 || (major === 3 && minor < 10)) {
+      return {
+        level: "error",
+        message: `Python ${major}.${minor} found — Hermes requires Python 3.10+`,
+        hint: "Upgrade Python to 3.10 or later",
+        code: "hermes_python_old",
+      };
+    }
+    return null;
+  }
+
+  const candidates = [
+    ...discoverManagedPythonCandidates(config),
+    "python3",
+    "python",
+    ...(asString(config.hermesCommand) === process.execPath ? [process.execPath] : []),
+  ];
+  for (const candidate of candidates) {
     try {
       const { stdout } = await execFileAsync(candidate, ["--version"], {
         timeout: 5_000,
+        env,
       });
       const version = stdout.trim();
       const match = version.match(/(\d+)\.(\d+)/);
@@ -367,8 +428,10 @@ export async function testEnvironment(
     return { adapterType: ADAPTER_TYPE, status: checks.some(check => check.level === "error") ? "fail" : "pass", checks, testedAt: new Date().toISOString() };
   }
 
+  const execEnv = buildExecEnv(config);
+
   // 1. CLI installed?
-  const cliCheck = await checkCliInstalled(command);
+  const cliCheck = await checkCliInstalled(command, execEnv);
   if (cliCheck) {
     checks.push(cliCheck);
     if (cliCheck.level === "error") {
@@ -382,11 +445,11 @@ export async function testEnvironment(
   }
 
   // 2. CLI version
-  const versionCheck = await checkCliVersion(command);
+  const versionCheck = await checkCliVersion(command, execEnv);
   if (versionCheck) checks.push(versionCheck);
 
   // 3. Python available?
-  const pythonCheck = await checkPython();
+  const pythonCheck = await checkPython(config, execEnv, versionCheck?.message);
   if (pythonCheck) checks.push(pythonCheck);
 
   // 4. Model config

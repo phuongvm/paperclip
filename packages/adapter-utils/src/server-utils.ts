@@ -4360,20 +4360,31 @@ export function writePaperclipSkillSyncPreference(
   return next;
 }
 
-async function defaultLinkPaperclipSkill(
+export async function linkPaperclipSkillDirectory(
   linkSource: string,
   linkTarget: string,
+  options: {
+    platform?: NodeJS.Platform;
+    symlink?: (
+      target: string,
+      path: string,
+      type?: "dir" | "file" | "junction",
+    ) => Promise<void>;
+  } = {},
 ): Promise<void> {
+  const platform = options.platform ?? process.platform;
+  const symlinkImpl =
+    options.symlink ?? ((src, dst, type) => fs.symlink(src, dst, type));
   try {
-    await fs.symlink(linkSource, linkTarget, "dir");
+    await symlinkImpl(linkSource, linkTarget, "dir");
   } catch (error) {
     if (
-      process.platform !== "win32" ||
+      platform !== "win32" ||
       (error as NodeJS.ErrnoException | null)?.code !== "EPERM"
     ) {
       throw error;
     }
-    await fs.symlink(
+    await symlinkImpl(
       path.resolve(path.dirname(linkTarget), linkSource),
       linkTarget,
       "junction",
@@ -4384,7 +4395,8 @@ async function defaultLinkPaperclipSkill(
 export async function ensurePaperclipSkillSymlink(
   source: string,
   target: string,
-  linkSkill: (source: string, target: string) => Promise<void> = defaultLinkPaperclipSkill,
+  linkSkill: (source: string, target: string) => Promise<void> = (src, dst) =>
+    linkPaperclipSkillDirectory(src, dst),
 ): Promise<"created" | "repaired" | "skipped"> {
   const existing = await fs.lstat(target).catch(() => null);
   if (!existing) {
