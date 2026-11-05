@@ -9,9 +9,35 @@
  */
 
 import { readFile } from "node:fs/promises";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { homedir } from "node:os";
 import { MODEL_PREFIX_PROVIDER_HINTS, VALID_PROVIDERS } from "../shared/constants.js";
+
+function asNonEmptyString(value: unknown): string | null {
+  return typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
+}
+
+/**
+ * Resolve the active Hermes home directory using explicit adapter config env first,
+ * then host process HERMES_HOME, then HOME/USERPROFILE/.hermes.
+ */
+export function resolveHermesHome(config?: Record<string, unknown>): string {
+  const env =
+    config && typeof config.env === "object" && config.env !== null && !Array.isArray(config.env)
+      ? (config.env as Record<string, unknown>)
+      : {};
+  const configHermesHome = asNonEmptyString(env.HERMES_HOME);
+  if (configHermesHome) return resolve(configHermesHome);
+  const configHome = asNonEmptyString(env.HOME);
+  if (configHome) return join(resolve(configHome), ".hermes");
+  const processHermesHome = asNonEmptyString(process.env.HERMES_HOME);
+  if (processHermesHome) return resolve(processHermesHome);
+  const fallbackHome =
+    asNonEmptyString(process.env.HOME) ??
+    asNonEmptyString(process.env.USERPROFILE) ??
+    homedir();
+  return join(resolve(fallbackHome), ".hermes");
+}
 
 export interface DetectedModel {
   /** Model name from config (e.g. "gpt-5.4", "anthropic/claude-sonnet-4") */
@@ -22,6 +48,8 @@ export interface DetectedModel {
   baseUrl: string;
   /** Whether Hermes config includes a non-empty API key. */
   hasApiKey: boolean;
+  /** Optional environment variable name referenced via model.key_env. */
+  keyEnv?: string;
   /** API mode from config (e.g. "chat_completions", "codex_responses"). May be empty. */
   apiMode: string;
   /** Where the detection came from */
@@ -33,8 +61,9 @@ export interface DetectedModel {
  */
 export async function detectModel(
   configPath?: string,
+  config?: Record<string, unknown>,
 ): Promise<DetectedModel | null> {
-  const filePath = configPath ?? join(homedir(), ".hermes", "config.yaml");
+  const filePath = configPath ?? join(resolveHermesHome(config), "config.yaml");
 
   let content: string;
   try {
@@ -47,7 +76,7 @@ export async function detectModel(
 }
 
 /**
- * Parse model.default, model.provider, model.base_url, model.api_key, and model.api_mode
+ * Parse model.default, model.provider, model.base_url, model.api_key, model.key_env, and model.api_mode
  * from raw YAML content. Uses simple regex parsing to avoid a YAML dependency.
  */
 export function parseModelFromConfig(content: string): DetectedModel | null {
@@ -56,6 +85,7 @@ export function parseModelFromConfig(content: string): DetectedModel | null {
   let provider = "";
   let baseUrl = "";
   let hasApiKey = false;
+  let keyEnv = "";
   let apiMode = "";
   let inModelSection = false;
   let modelSectionIndent = 0;
@@ -85,6 +115,7 @@ export function parseModelFromConfig(content: string): DetectedModel | null {
         if (key === "provider") provider = val;
         if (key === "base_url") baseUrl = val;
         if (key === "api_key") hasApiKey = val.length > 0;
+        if (key === "key_env") keyEnv = val;
         if (key === "api_mode") apiMode = val;
       }
     }
@@ -92,7 +123,15 @@ export function parseModelFromConfig(content: string): DetectedModel | null {
 
   if (!model) return null;
 
-  return { model, provider, baseUrl, hasApiKey, apiMode, source: "config" };
+  return {
+    model,
+    provider,
+    baseUrl,
+    hasApiKey,
+    ...(keyEnv ? { keyEnv } : {}),
+    apiMode,
+    source: "config",
+  };
 }
 
 /**

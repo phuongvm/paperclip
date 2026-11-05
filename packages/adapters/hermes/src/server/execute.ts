@@ -396,7 +396,7 @@ export async function execute(
 
   if (!explicitProvider) {
     try {
-      detectedConfig = await detectModel();
+      detectedConfig = await detectModel(undefined, config);
     } catch {
       // Non-fatal — detection failure shouldn't block execution
     }

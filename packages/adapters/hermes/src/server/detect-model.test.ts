@@ -20,6 +20,7 @@ const previousEnv = {
   USERPROFILE: process.env.USERPROFILE,
   HOMEDRIVE: process.env.HOMEDRIVE,
   HOMEPATH: process.env.HOMEPATH,
+  HERMES_HOME: process.env.HERMES_HOME,
   ...Object.fromEntries(providerEnvKeys.map((key) => [key, process.env[key]])),
 };
 
@@ -104,6 +105,7 @@ async function withHermesHomeConfig(
   process.env.USERPROFILE = tempHome;
   delete process.env.HOMEDRIVE;
   delete process.env.HOMEPATH;
+  delete process.env.HERMES_HOME;
   for (const key of providerEnvKeys) {
     delete process.env[key];
   }
@@ -183,4 +185,52 @@ test("testEnvironment does not warn about missing API keys when Hermes config pr
     expect(codes.includes("hermes_no_api_keys")).toBe(false);
     expect(result.status).toBe("pass");
   });
+});
+
+test("testEnvironment resolves HERMES_HOME config.yaml key_env and .env without warning", async () => {
+  const customHermesHome = await mkdtemp(join(tmpdir(), "hermes-custom-home-"));
+  const emptyUserHome = await mkdtemp(join(tmpdir(), "hermes-empty-user-"));
+  try {
+    await writeFile(
+      join(customHermesHome, "config.yaml"),
+      [
+        "model:",
+        "  default: cb-gemini-argon",
+        "  provider: ai-router",
+        "  base_url: http://192.168.100.110:20128/v1",
+        "  api_mode: chat_completions",
+        "  key_env: HERMES_CUSTOM_AI_ROUTER_API_KEY",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    await writeFile(
+      join(customHermesHome, ".env"),
+      "HERMES_CUSTOM_AI_ROUTER_API_KEY=router-test-token\n",
+      "utf8",
+    );
+
+    process.env.HOME = emptyUserHome;
+    process.env.USERPROFILE = emptyUserHome;
+    process.env.HERMES_HOME = customHermesHome;
+    for (const key of providerEnvKeys) {
+      delete process.env[key];
+    }
+
+    const result = await testEnvironment({
+      companyId: "company-test",
+      adapterType: "hermes_local",
+      config: {
+        hermesCommand: process.execPath,
+      },
+    });
+
+    const codes = result.checks.map((check) => check.code);
+    expect(codes.includes("hermes_no_api_keys")).toBe(false);
+    expect(codes.includes("hermes_custom_provider_config")).toBe(true);
+    expect(result.status).toBe("pass");
+  } finally {
+    await rm(customHermesHome, { recursive: true, force: true });
+    await rm(emptyUserHome, { recursive: true, force: true });
+  }
 });

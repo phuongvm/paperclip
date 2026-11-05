@@ -134,7 +134,14 @@ test("Hermes rejects a live symlink owned by another operational skill", async (
     await fs.mkdir(conflictingSource, { recursive: true });
     await fs.writeFile(path.join(conflictingSource, "SKILL.md"), "# External skill\n", "utf8");
     await fs.mkdir(path.dirname(target), { recursive: true });
-    await fs.symlink(conflictingSource, target);
+    try {
+      await fs.symlink(conflictingSource, target, "dir");
+    } catch (error) {
+      if (process.platform !== "win32" || (error as NodeJS.ErrnoException).code !== "EPERM") {
+        throw error;
+      }
+      await fs.symlink(path.resolve(conflictingSource), target, "junction");
+    }
     const adapter = createServerAdapter();
 
     await expect(adapter.syncSkills?.({
@@ -152,5 +159,42 @@ test("Hermes rejects a live symlink owned by another operational skill", async (
     }, [])).rejects.toThrow("occupied by another installation");
   } finally {
     await fs.rm(home, { recursive: true, force: true });
+  }
+});
+
+test("Hermes syncSkills honors process.env.HERMES_HOME when config.env is unset", async () => {
+  const prevHermesHome = process.env.HERMES_HOME;
+  const customHermesHome = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-hermes-env-home-"));
+  const runtimeDir = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-hermes-runtime-src-"));
+  try {
+    process.env.HERMES_HOME = customHermesHome;
+    const source = path.join(runtimeDir, "paperclip");
+    await fs.mkdir(source, { recursive: true });
+    await fs.writeFile(path.join(source, "SKILL.md"), "# Paperclip\n", "utf8");
+    const adapter = createServerAdapter();
+
+    const snapshot = await adapter.syncSkills?.({
+      adapterType: "hermes_local",
+      agentId: "11111111-1111-4111-8111-111111111111",
+      companyId: "22222222-2222-4222-8222-222222222222",
+      config: {
+        paperclipRuntimeSkills: [{
+          key: "paperclipai/paperclip/paperclip",
+          runtimeName: "paperclip",
+          source,
+        }],
+      },
+    }, []);
+
+    expect(snapshot?.desiredSkills).toContain("paperclipai/paperclip/paperclip");
+    expect((await fs.lstat(path.join(customHermesHome, "skills", "paperclip"))).isSymbolicLink()).toBe(true);
+  } finally {
+    if (prevHermesHome === undefined) {
+      delete process.env.HERMES_HOME;
+    } else {
+      process.env.HERMES_HOME = prevHermesHome;
+    }
+    await fs.rm(customHermesHome, { recursive: true, force: true });
+    await fs.rm(runtimeDir, { recursive: true, force: true });
   }
 });

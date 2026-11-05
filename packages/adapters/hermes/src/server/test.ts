@@ -13,10 +13,11 @@ import type {
 
 import { execFile } from "node:child_process";
 import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { promisify } from "node:util";
 
 import { HERMES_CLI, DEFAULT_MODEL, ADAPTER_TYPE, VALID_PROVIDERS } from "../shared/constants.js";
-import { detectModel, resolveProvider, inferProviderFromModel } from "./detect-model.js";
+import { detectModel, resolveHermesHome, resolveProvider, inferProviderFromModel } from "./detect-model.js";
 import { resolveHermesCommand } from "./execute.js";
 
 const execFileAsync = promisify(execFile);
@@ -84,33 +85,36 @@ async function checkCliVersion(
 }
 
 async function checkPython(): Promise<AdapterEnvironmentCheck | null> {
-  try {
-    const { stdout } = await execFileAsync("python3", ["--version"], {
-      timeout: 5_000,
-    });
-    const version = stdout.trim();
-    const match = version.match(/(\d+)\.(\d+)/);
-    if (match) {
-      const major = parseInt(match[1], 10);
-      const minor = parseInt(match[2], 10);
-      if (major < 3 || (major === 3 && minor < 10)) {
-        return {
-          level: "error",
-          message: `Python ${version} found — Hermes requires Python 3.10+`,
-          hint: "Upgrade Python to 3.10 or later",
-          code: "hermes_python_old",
-        };
+  for (const candidate of ["python3", "python"]) {
+    try {
+      const { stdout } = await execFileAsync(candidate, ["--version"], {
+        timeout: 5_000,
+      });
+      const version = stdout.trim();
+      const match = version.match(/(\d+)\.(\d+)/);
+      if (match) {
+        const major = parseInt(match[1], 10);
+        const minor = parseInt(match[2], 10);
+        if (major < 3 || (major === 3 && minor < 10)) {
+          return {
+            level: "error",
+            message: `Python ${version} found — Hermes requires Python 3.10+`,
+            hint: "Upgrade Python to 3.10 or later",
+            code: "hermes_python_old",
+          };
+        }
+        return null; // OK
       }
+    } catch {
+      // Try next candidate
     }
-    return null; // OK
-  } catch {
-    return {
-      level: "warn",
-      message: "python3 not found in PATH",
-      hint: "Hermes Agent requires Python 3.10+. Install it from python.org",
-      code: "hermes_python_missing",
-    };
   }
+  return {
+    level: "warn",
+    message: "python3 not found in PATH",
+    hint: "Hermes Agent requires Python 3.10+. Install it from python.org",
+    code: "hermes_python_missing",
+  };
 }
 
 function checkModel(
@@ -151,8 +155,7 @@ async function checkApiKeys(
   // accurate results for keys that Hermes already knows about.
   const hermesEnvKeys: Record<string, string> = {};
   try {
-    const homeDir = process.env.HOME || process.env.USERPROFILE || "/root";
-    const hermesEnvPath = `${homeDir}/.hermes/.env`;
+    const hermesEnvPath = join(resolveHermesHome(config), ".env");
     const content = readFileSync(hermesEnvPath, "utf-8");
     for (const line of content.split("\n")) {
       const trimmed = line.trim();
@@ -165,7 +168,7 @@ async function checkApiKeys(
       }
     }
   } catch {
-    // ~/.hermes/.env may not exist — that's fine
+    // <HERMES_HOME>/.env may not exist — that's fine
   }
 
   const has = (key: string): boolean =>
@@ -201,8 +204,12 @@ async function checkApiKeys(
     !!detectedConfig?.model &&
     (!requestedModel || detectedConfig.model.toLowerCase() === requestedModel.toLowerCase());
 
+  const hasConfiguredKey = Boolean(
+    detectedConfig?.hasApiKey ||
+      (detectedConfig?.keyEnv && has(detectedConfig.keyEnv)),
+  );
   const matchingHermesConfigApiKey =
-    !!detectedConfig?.hasApiKey &&
+    hasConfiguredKey &&
     modelMatchesRequested;
 
   if (matchingHermesConfigApiKey && detectedConfig) {
@@ -389,7 +396,7 @@ export async function testEnvironment(
   // 5. Detect Hermes config once for the remaining checks.
   let detectedConfig: Awaited<ReturnType<typeof detectModel>> | null = null;
   try {
-    detectedConfig = await detectModel();
+    detectedConfig = await detectModel(undefined, config);
   } catch {
     // Non-fatal
   }
