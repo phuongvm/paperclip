@@ -2,6 +2,7 @@ import { notifyAttentionRetentionWork, notifyIssueAttentionRetentionWork } from 
 import { notifyNativeResultCommit } from "./native-result-commit-notifications.js";
 import { notifyNativeWorkspaceFinalization } from "./native-workspace-finalization-notifications.js";
 import { notifyNativeStatusReassessment } from "./native-status-reassessment-notifications.js";
+import { notifyTerminalWorkspaceWork } from "./terminal-workspace-work.js";
 import { randomUUID } from "node:crypto";
 import type { Db } from "@paperclipai/db";
 import { workspaceOperations } from "@paperclipai/db";
@@ -10,6 +11,7 @@ import { asc, desc, eq, gte, inArray, isNull, lt, or, and } from "drizzle-orm";
 import { conflict, notFound } from "../errors.js";
 import { redactCurrentUserText, redactCurrentUserValue } from "../log-redaction.js";
 import { instanceSettingsService } from "./instance-settings.js";
+import { currentProcessSpaceHash, processExists, sameProcessSpace } from "./controller-process-identity.js";
 import { getWorkspaceOperationLogStore } from "./workspace-operation-log-store.js";
 
 type WorkspaceOperationRow = typeof workspaceOperations.$inferSelect;
@@ -70,6 +72,8 @@ type RuntimeControlOwnerStamp = {
   pid: number;
   action: string;
   heartbeatAt: string;
+  /** PID space of `pid`. Absent on stamps written before it was recorded. */
+  hostHash?: string;
 };
 
 function readRuntimeControlAction(metadata: unknown): string | null {
@@ -90,6 +94,7 @@ function readRuntimeControlOwner(metadata: unknown): RuntimeControlOwnerStamp | 
     pid: typeof record.pid === "number" ? record.pid : 0,
     action: typeof record.action === "string" ? record.action : "start",
     heartbeatAt: typeof record.heartbeatAt === "string" ? record.heartbeatAt : new Date(0).toISOString(),
+    ...(typeof record.hostHash === "string" ? { hostHash: record.hostHash } : {}),
   };
 }
 
@@ -117,20 +122,17 @@ export function isNativeWorkspaceFinalizationOperationActive(scope: NativeFinali
 }
 
 /**
- * Whether the process that stamped an operation is still alive on this host. A dead owner can
- * never heartbeat again, so its operation is recoverable immediately instead of after the
- * staleness window — which is what makes recovery after a crash or restart prompt. Signal 0
- * only probes; it never touches the process.
+ * Whether the process that stamped an operation has provably exited. A dead owner can never
+ * heartbeat again, so its operation is recoverable immediately instead of after the staleness
+ * window — which is what makes recovery after a crash or restart prompt. The PID is judged only
+ * in the PID space that recorded it: an owner on another host or namespace, an unreadable
+ * space, or a stamp without a recorded space is never proven gone here and waits out the
+ * staleness window instead. Signal 0 only probes; EPERM means the process exists.
  */
-function ownerProcessIsAlive(pid: number): boolean {
-  if (!Number.isInteger(pid) || pid <= 0) return false;
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    // EPERM means the pid exists but belongs to another user: treat it as alive.
-    return (error as NodeJS.ErrnoException)?.code === "EPERM";
-  }
+function ownerProcessProvenGone(owner: RuntimeControlOwnerStamp): boolean {
+  if (!sameProcessSpace(owner.hostHash)) return false;
+  if (!Number.isInteger(owner.pid) || owner.pid <= 0) return false;
+  return !processExists(owner.pid);
 }
 
 /**
@@ -335,7 +337,7 @@ export function workspaceOperationService(db: Db) {
       const ownedHereAndLive = ownedByThisProcess && liveRuntimeControlOperationIds.has(candidate.id);
       // A previous server process that no longer exists cannot heartbeat again, so its
       // operations are recoverable at once instead of after the staleness window.
-      const ownerProcessGone = owner !== null && !ownedByThisProcess && !ownerProcessIsAlive(owner.pid);
+      const ownerProcessGone = owner !== null && !ownedByThisProcess && ownerProcessProvenGone(owner);
 
       if (ownedHereAndLive) {
         // This process is driving it right now; its own time budget is what terminalizes it.
@@ -473,24 +475,27 @@ export function workspaceOperationService(db: Db) {
     }): WorkspaceOperationRecorder {
       let executionWorkspaceId = input.executionWorkspaceId ?? null;
       const createdIds: string[] = [];
+      let hasFinalization = false;
 
       return {
         async attachExecutionWorkspaceId(nextExecutionWorkspaceId) {
           executionWorkspaceId = nextExecutionWorkspaceId ?? null;
           if (!executionWorkspaceId || createdIds.length === 0) return;
-          await db
-            .update(workspaceOperations)
-            .set({
-              executionWorkspaceId,
-              updatedAt: new Date(),
-            })
-            .where(inArray(workspaceOperations.id, createdIds));
+          await db.transaction(async tx => {
+            if (hasFinalization) await notifyTerminalWorkspaceWork(tx, `workspace:${executionWorkspaceId}`);
+            await tx
+              .update(workspaceOperations)
+              .set({ executionWorkspaceId, updatedAt: new Date() })
+              .where(and(eq(workspaceOperations.companyId, input.companyId), inArray(workspaceOperations.id, createdIds)));
+          });
         },
 
         async recordOperation(recordInput) {
           async function writeState<T>(write: (database: Db) => Promise<T>): Promise<T> {
             if (recordInput.phase !== "workspace_finalize" || (!input.heartbeatRunId && !executionWorkspaceId && !input.issueId)) return write(db);
             return db.transaction(async tx => {
+              if (executionWorkspaceId) await notifyTerminalWorkspaceWork(tx, `workspace:${executionWorkspaceId}`);
+              else if (input.issueId) await notifyTerminalWorkspaceWork(tx, `issue:${input.issueId}`);
               if (!input.heartbeatRunId) {
                 // An export clears barriers for every issue sharing this workspace.
                 if (executionWorkspaceId) await notifyAttentionRetentionWork(tx, { companyId: input.companyId, sourceKind: "blocker_attention" });
@@ -539,6 +544,7 @@ export function workspaceOperationService(db: Db) {
                 runtimeControlOwner: {
                   ownerId: RUNTIME_CONTROL_OWNER_ID,
                   pid: process.pid,
+                  hostHash: currentProcessSpaceHash(),
                   action: runtimeControlAction,
                   heartbeatAt: startedAt.toISOString(),
                 } satisfies RuntimeControlOwnerStamp,
@@ -579,6 +585,7 @@ export function workspaceOperationService(db: Db) {
             throw insertError;
           }
           createdIds.push(id);
+          if (recordInput.phase === "workspace_finalize") hasFinalization = true;
 
           let heartbeatTimer: NodeJS.Timeout | null = null;
           let timeoutTimer: NodeJS.Timeout | null = null;
@@ -589,6 +596,7 @@ export function workspaceOperationService(db: Db) {
                 runtimeControlOwner: {
                   ownerId: RUNTIME_CONTROL_OWNER_ID,
                   pid: process.pid,
+                  hostHash: currentProcessSpaceHash(),
                   action: runtimeControlAction,
                   heartbeatAt: heartbeatAt.toISOString(),
                 } satisfies RuntimeControlOwnerStamp,

@@ -1,11 +1,13 @@
 import { notifyActiveExecutionRecovery, notifyLiveRunRecovery } from "./live-run-recovery-notifications.js";
-import { randomUUID } from "node:crypto";
 import { and, eq, gt, lte, sql } from "drizzle-orm";
 import { heartbeatRuns, livenessDb, type Db } from "@paperclipai/db";
 import type { LegacyControllerLeaseLossCause, LegacyControllerLeaseLossTiming } from "./run-cancellation.js";
+import { randomUUID } from "node:crypto";
+import { currentControllerBootId } from "./controller-process-identity.js";
 
-// A boot UUID has meaning across containers; a numeric PID does not.
-export const legacyControllerBootId = randomUUID();
+// A boot UUID has meaning across containers; a numeric PID does not. Legacy
+// leases stamp the single process boot id shared with native claims.
+export const legacyControllerBootId = currentControllerBootId();
 export const LEGACY_CONTROLLER_LEASE_MS = 60_000;
 export const LEGACY_CONTROLLER_RENEW_MS = 10_000;
 
@@ -30,6 +32,7 @@ export class LegacyControllerLeaseLostError extends Error {
 export function legacyControllerClaim(runtimeMode: string) {
   if (runtimeMode === "native") return {};
   return {
+    legacyProcessSettlement: null,
     controllerBootId: legacyControllerBootId,
     controllerLeaseExpiresAt: sql`clock_timestamp() + interval '60 seconds'`,
     executionStage: "preparing",
@@ -65,6 +68,10 @@ export async function renewLegacyControllerLease(
 /** One attempt may wait at most this long; a timed-out attempt is retried
  * until the lease deadline instead of holding the renewal for the whole lease. */
 export const LEGACY_CONTROLLER_RENEWAL_STATEMENT_TIMEOUT_MS = 10_000;
+
+/** Pause before retrying a renewal that failed with an error, so a dropped
+ * connection is retried without spinning against an unavailable database. */
+export const LEGACY_CONTROLLER_RENEWAL_RETRY_DELAY_MS = 1_000;
 
 function isStatementTimeout(error: unknown): boolean {
   for (let cause = error, depth = 0; cause && depth < 4; cause = (cause as { cause?: unknown }).cause, depth++) {
@@ -156,21 +163,24 @@ export function watchLegacyControllerLease(
   // points at the database; a late deadline callback points at the event loop.
   let lastRenewedAt = Date.now();
   let renewalCount = 0;
+  // A non-timeout error since the last successful renewal, so a deadline that
+  // passes during the retries is attributed to the error, not to a stall.
+  let renewalFailed = false;
   const renewalsInFlight = new Set<{ startedAt: number }>();
   let deadlineDueAt = 0;
   let deadline: ReturnType<typeof setTimeout> | undefined;
-  const lost = (cause: LegacyControllerLeaseLossCause) => {
+  const lost = (cause: LegacyControllerLeaseLossCause, atDeadline = false) => {
     if (stopped || controller.signal.aborted) return;
     const now = Date.now();
     const oldestRenewal = Math.min(...[...renewalsInFlight].map((renewal) => renewal.startedAt));
     controller.abort(new LegacyControllerLeaseLostError(cause, {
       sinceRenewalMs: now - lastRenewedAt,
       renewalPendingMs: renewalsInFlight.size > 0 ? now - oldestRenewal : null,
-      deadlineLateMs: cause === "renewal_deadline" ? Math.max(0, now - deadlineDueAt) : null,
+      deadlineLateMs: atDeadline ? Math.max(0, now - deadlineDueAt) : null,
       renewalCount,
     }));
   };
-  const deadlinePassed = () => lost("renewal_deadline");
+  const deadlinePassed = () => lost(renewalFailed ? "renewal_error" : "renewal_deadline", true);
   const armDeadline = (delayMs: number) => {
     clearTimeout(deadline);
     deadlineDueAt = Date.now() + delayMs;
@@ -191,6 +201,8 @@ export function watchLegacyControllerLease(
     });
     // The successful attempt's UPDATE writes a fresh lease, so the local
     // deadline is measured from that attempt rather than the first one.
+    // Failed attempts are retried until the deadline aborts the controller:
+    // the UPDATE is idempotent and still requires this controller's boot ID.
     let attemptStartedAt = startedAt;
     const renew = async () => {
       for (;;) {
@@ -198,7 +210,13 @@ export function watchLegacyControllerLease(
         try {
           return await renewOnLivenessPool(db, run, stage, renewalStatementTimeoutMs);
         } catch (error) {
-          if (!isStatementTimeout(error) || stopped || controller.signal.aborted) throw error;
+          if (stopped || controller.signal.aborted) throw error;
+          // A statement timeout is a stall; it stays a `renewal_deadline` loss.
+          if (!isStatementTimeout(error)) {
+            renewalFailed = true;
+            await new Promise((resolve) => setTimeout(resolve, LEGACY_CONTROLLER_RENEWAL_RETRY_DELAY_MS));
+            if (stopped || controller.signal.aborted) throw error;
+          }
         }
       }
     };
@@ -218,6 +236,7 @@ export function watchLegacyControllerLease(
     if (!stopped) {
       lastRenewedAt = Date.now();
       renewalCount += 1;
+      renewalFailed = false;
       armDeadline(Math.max(0, LEGACY_CONTROLLER_LEASE_MS - (Date.now() - attemptStartedAt)));
     }
   };

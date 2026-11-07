@@ -2,9 +2,17 @@ import { signalDatabaseWork, subscribeDatabaseWork } from "@paperclipai/db/work-
 
 /** Topics for existing durable queues; register intent before their writes. */
 export const DELIVERY_QUEUES = {
+  mcpClientMirror: "mcp-client-mirror",
+  mcpIngressHandoffs: "mcp-ingress-handoffs",
+  mcpRevocationIndex: "mcp-revocation-index",
+  nativeRuntimeResponses: "native-runtime-responses",
+  nativeCancellation: "native-cancellation",
+  deploymentNotifications: "deployment-notifications",
+  liveInvalidations: "live-invalidations",
   nativeProcessSessions: "native-process-sessions",
   nativeQuestionCancellations: "native-question-cancellations",
   activeExecutionRecovery: "active-execution-recovery",
+  ownershipInvariantReport: "ownership-invariant-report",
   settledNativeProcesses: "settled-native-processes",
   orphanActiveLeases: "orphan-active-leases",
   legacyShutdownSettlement: "legacy-shutdown-settlement",
