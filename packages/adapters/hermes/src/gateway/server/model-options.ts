@@ -1,7 +1,9 @@
 import type {
+  AdapterCatalogContext,
   AdapterConfigSchema,
   AdapterModel,
 } from "@paperclipai/adapter-utils";
+export type { AdapterCatalogContext };
 import { asString, parseObject } from "@paperclipai/adapter-utils/server-utils";
 import {
   DEFAULT_EVENT_RECONNECT_MS,
@@ -19,12 +21,6 @@ import {
   type HermesProviderPolicy,
 } from "../../server/catalog.js";
 
-export interface AdapterCatalogContext {
-  apiBaseUrl: string;
-  profile?: string;
-  authHeader?: string;
-  cacheKey: string;
-}
 import {
   resolveHermesInvocation,
   type HermesResolverErrorCode,

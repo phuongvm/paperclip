@@ -32,6 +32,7 @@ export type {
   ConfigFieldOption,
   ConfigFieldSchema,
   AdapterConfigSchema,
+  AdapterCatalogContext,
   AdapterRuntimeCommandSpec,
   AcpTargetDescriptor,
   ServerAdapterModule,

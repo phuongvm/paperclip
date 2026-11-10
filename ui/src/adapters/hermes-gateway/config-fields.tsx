@@ -1,6 +1,7 @@
 import { configFieldsForSection } from "../config-sections";
 import { useEffect, useState } from "react";
 import { Eye, EyeOff } from "lucide-react";
+import type { AdapterConfigSchema } from "@paperclipai/adapter-utils";
 import type { AdapterConfigFieldsProps, CreateConfigValues } from "../types";
 import { useConfigSchema } from "../schema-config-fields";
 import {
@@ -102,6 +103,8 @@ function SecretField({
 
 export function HermesGatewayConfigFields({
   section,
+  companyId,
+  agentId,
   isCreate,
   values,
   set,
@@ -147,7 +150,36 @@ export function HermesGatewayConfigFields({
     : headersDraft;
 
   const tier1Schema = useConfigSchema("hermes_gateway");
-  const effectiveSchema = tier1Schema;
+  const [tier2Schema, setTier2Schema] = useState<AdapterConfigSchema | null>(null);
+
+  useEffect(() => {
+    if (isCreate || !companyId || !agentId) {
+      setTier2Schema(null);
+      return;
+    }
+    let cancelled = false;
+    const url = `/api/adapters/hermes_gateway/config-schema?companyId=${encodeURIComponent(
+      companyId,
+    )}&agentId=${encodeURIComponent(agentId)}`;
+    fetch(url)
+      .then(async (res) => {
+        if (!res.ok) return null;
+        return (await res.json()) as AdapterConfigSchema;
+      })
+      .then((schema) => {
+        if (!cancelled && schema) {
+          setTier2Schema(schema);
+        }
+      })
+      .catch(() => {
+        // Degrade safely to Tier 1 schema on network error
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [isCreate, companyId, agentId]);
+
+  const effectiveSchema = !isCreate && tier2Schema ? tier2Schema : tier1Schema;
   const providerField = effectiveSchema?.fields.find((f) => f.key === "provider");
   const modelField = effectiveSchema?.fields.find((f) => f.key === "model");
 

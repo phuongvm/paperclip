@@ -76,6 +76,7 @@ export function createServerAdapter(): ServerAdapterModule {
     models,
     listModels: listHermesGatewayModels,
     refreshModels: refreshHermesGatewayModels,
+    supportsAgentScopedCatalog: true,
     supportsLocalAgentJwt: false,
     supportsInstructionsBundle: false,
     requiresMaterializedRuntimeSkills: false,

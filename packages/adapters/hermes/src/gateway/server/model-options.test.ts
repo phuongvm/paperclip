@@ -1,10 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  getHermesGatewayConfigSchema,
   listHermesGatewayModels,
   parseModelOptionsPayload,
   refreshHermesGatewayModels,
   resetGatewayCatalogCacheForTests,
 } from "./model-options.js";
+import { createServerAdapter } from "../index.js";
+import { selectionFromOption } from "../../server/resolver.js";
 import { testEnvironment } from "./test.js";
 
 const REDACTED_MODEL_OPTIONS_PAYLOAD = {
@@ -216,5 +219,145 @@ describe("hermes_gateway /api/model/options parser and Tier 1 catalog (S3 Task 3
     // Logs must never contain the secret key, only code + host
     const logText = warnSpy.mock.calls.map((args) => args.join(" ")).join("\n");
     expect(logText).not.toContain("super-secret-operator-key");
+  });
+
+  it("R2-P01 shared-label fixture: projects distinct lossless entries, disambiguates Shared (router-a) vs Shared (router-b), replaces Tier 1 with Tier 2, and declares supportsAgentScopedCatalog", async () => {
+    const adapter = createServerAdapter();
+    expect(adapter.supportsAgentScopedCatalog).toBe(true);
+
+    // Tier 1 env returns {router-a, tier1-only}
+    const tier1Payload = {
+      providers: [
+        {
+          slug: "router-a",
+          name: "Shared",
+          is_user_defined: true,
+          models: ["m"],
+        },
+        {
+          slug: "tier1-only",
+          name: "Tier 1 Only",
+          is_user_defined: true,
+          models: ["t1"],
+        },
+      ],
+      provider: "router-a",
+      model: "m",
+    };
+
+    // Tier 2 payload returns {router-a, router-b (both named Shared, model m), remote-router (r1)}
+    const tier2Payload = {
+      providers: [
+        {
+          slug: "router-a",
+          name: "Shared",
+          is_user_defined: true,
+          models: ["m"],
+        },
+        {
+          slug: "router-b",
+          name: "Shared",
+          is_user_defined: true,
+          models: ["m"],
+        },
+        {
+          slug: "remote-router",
+          name: "Remote",
+          is_user_defined: true,
+          models: ["r1"],
+        },
+      ],
+      provider: "router-a",
+      model: "m",
+    };
+
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.startsWith("https://remote-gw.example")) {
+        return new Response(JSON.stringify(tier2Payload), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      return new Response(JSON.stringify(tier1Payload), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    });
+
+    const tier1Schema = await getHermesGatewayConfigSchema();
+    const tier1ProvField = tier1Schema.fields.find((f) => f.key === "provider");
+    expect(tier1ProvField?.options?.map((o) => o.value)).toEqual([
+      "auto",
+      "router-a",
+      "tier1-only",
+    ]);
+
+    const secretValue = "agent-secret-token-xyz-987654";
+    const ctx = {
+      apiBaseUrl: "https://remote-gw.example",
+      profile: "coder",
+      authHeader: `Bearer ${secretValue}`,
+      cacheKey: "sha256-opaque-cache-key-without-secret",
+    };
+
+    const tier2Models = await listHermesGatewayModels(ctx);
+    const tier2Schema = await getHermesGatewayConfigSchema(ctx);
+
+    // (1) Distinct projections router-a/m != router-b/m
+    const projA = tier2Models.find((m) => m.id === "router-a/m")!;
+    const projB = tier2Models.find((m) => m.id === "router-b/m")!;
+    expect(projA).toMatchObject({
+      id: "router-a/m",
+      providerId: "router-a",
+      rawModelId: "m",
+      providerLabel: "Shared",
+    });
+    expect(projB).toMatchObject({
+      id: "router-b/m",
+      providerId: "router-b",
+      rawModelId: "m",
+      providerLabel: "Shared",
+    });
+    expect(projA).not.toEqual(projB);
+
+    // (2) Unique ids and distinct selectionFromOption
+    const allIds = tier2Models.map((m) => m.id);
+    expect(new Set(allIds).size).toBe(allIds.length);
+    expect(selectionFromOption(projA)).toEqual({
+      provider: "router-a",
+      model: "m",
+    });
+    expect(selectionFromOption(projB)).toEqual({
+      provider: "router-b",
+      model: "m",
+    });
+    expect(selectionFromOption(projA)).not.toEqual(selectionFromOption(projB));
+
+    // (3) provider.options values ["auto","router-a","router-b","remote-router"] with labels Shared (router-a) != Shared (router-b)
+    const tier2ProvField = tier2Schema.fields.find((f) => f.key === "provider")!;
+    expect(tier2ProvField.options).toEqual([
+      { value: "auto", label: "Auto" },
+      { value: "router-a", label: "Shared (router-a)" },
+      { value: "router-b", label: "Shared (router-b)" },
+      { value: "remote-router", label: "Remote (remote-router)" },
+    ]);
+
+    // (4) remote-router present in schema, providerModels, allowedProviders
+    const tier2ModelField = tier2Schema.fields.find((f) => f.key === "model")!;
+    const meta = tier2ModelField.meta as {
+      providerModels: Record<string, string[]>;
+      allowedProviders: string[];
+    };
+    expect(meta.providerModels["remote-router"]).toEqual(["r1"]);
+    expect(meta.allowedProviders).toContain("remote-router");
+
+    // (5) Tier 2 replaces Tier 1 (tier1-only is absent) and response/logs/cacheKey contain no secret value
+    expect(meta.allowedProviders).not.toContain("tier1-only");
+    expect(JSON.stringify(tier2Schema)).not.toContain(secretValue);
+    expect(JSON.stringify(tier2Models)).not.toContain(secretValue);
+    expect(ctx.cacheKey).not.toContain(secretValue);
+    expect(warnSpy.mock.calls.flat().join(" ")).not.toContain(secretValue);
   });
 });

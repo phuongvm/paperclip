@@ -355,4 +355,91 @@ describe("HermesGatewayConfigFields", () => {
 
     expect(result.container.textContent).toMatch(/invalid profile/i);
   });
+
+  it("Tier 2 edit mode fetches /api/adapters/hermes_gateway/config-schema?companyId=<cid>&agentId=<id> and replaces Tier 1 schema (remote-router appears, tier1-only disappears)", async () => {
+    const tier1Schema = makeGatewaySchema({
+      defaultProvider: "router-a",
+      allowedProviders: ["router-a", "tier1-only"],
+      providerLabels: {
+        "router-a": "Shared",
+        "tier1-only": "Tier 1 Only",
+      },
+      providerModels: {
+        "router-a": ["m"],
+        "tier1-only": ["t1"],
+      },
+    });
+
+    const tier2Schema = makeGatewaySchema({
+      defaultProvider: "router-a",
+      allowedProviders: ["router-a", "router-b", "remote-router"],
+      providerLabels: {
+        "router-a": "Shared",
+        "router-b": "Shared",
+        "remote-router": "Remote",
+      },
+      providerModels: {
+        "router-a": ["m"],
+        "router-b": ["m"],
+        "remote-router": ["r1"],
+      },
+    });
+
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockImplementation(async (input) => {
+        const url = String(input);
+        if (url.includes("companyId=company-1") && url.includes("agentId=agent-42")) {
+          return new Response(JSON.stringify(tier2Schema), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          });
+        }
+        return new Response(JSON.stringify(tier1Schema), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      });
+
+    const result = renderFields({
+      mode: "edit",
+      isCreate: false,
+      companyId: "company-1",
+      agentId: "agent-42",
+      config: {
+        apiBaseUrl: "https://remote-gw.example",
+        provider: "remote-router",
+        model: "r1",
+      },
+    });
+    roots.push(result.root);
+    await flushAsync();
+
+    expect(
+      fetchSpy.mock.calls.some(([input]) =>
+        String(input).includes(
+          "/api/adapters/hermes_gateway/config-schema?companyId=company-1&agentId=agent-42",
+        ),
+      ),
+    ).toBe(true);
+
+    const providerSelect = result.container.querySelector<HTMLSelectElement>(
+      'select[data-testid="hermes-gateway-provider"]',
+    )!;
+    const optionValues = Array.from(providerSelect.options).map((o) => o.value);
+    const optionLabels = Array.from(providerSelect.options).map(
+      (o) => o.textContent,
+    );
+
+    expect(optionValues).toEqual([
+      "auto",
+      "router-a",
+      "router-b",
+      "remote-router",
+    ]);
+    expect(optionValues).not.toContain("tier1-only");
+    expect(optionLabels).toContain("Shared (router-a)");
+    expect(optionLabels).toContain("Shared (router-b)");
+    expect(optionLabels).toContain("Remote (remote-router)");
+  });
 });

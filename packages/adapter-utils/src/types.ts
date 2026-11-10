@@ -483,6 +483,13 @@ export interface AdapterConfigSchema {
   fields: ConfigFieldSchema[];
 }
 
+export interface AdapterCatalogContext {
+  apiBaseUrl: string;
+  profile?: string;
+  authHeader?: string;
+  cacheKey: string;
+}
+
 export interface AdapterRuntimeCommandSpec {
   /**
    * The command Paperclip should execute for this adapter in the current config.
@@ -524,14 +531,14 @@ export interface ServerAdapterModule {
   /** How this adapter receives Paperclip's run-scoped control tools. */
   runtimeToolDelivery?: AdapterRuntimeToolDelivery;
   models?: AdapterModel[];
-  listModels?: () => Promise<AdapterModel[]>;
+  listModels?: (ctx?: AdapterCatalogContext) => Promise<AdapterModel[]>;
   /**
    * Optional explicit refresh hook for model discovery.
    * Use this when the adapter caches discovered models and needs a bypass path
    * so the UI can fetch newly released models without waiting for cache expiry
    * or a Paperclip code update.
    */
-  refreshModels?: () => Promise<AdapterModel[]>;
+  refreshModels?: (ctx?: AdapterCatalogContext) => Promise<AdapterModel[]>;
   agentConfigurationDoc?: string;
   /**
    * Optional lifecycle hook when an agent is approved/hired (join-request or hire_agent approval).
@@ -559,7 +566,14 @@ export interface ServerAdapterModule {
    * Dynamic options (e.g. scanning a profiles directory) should be
    * resolved inside this method — the caller receives a fully hydrated schema.
    */
-  getConfigSchema?: () => Promise<AdapterConfigSchema> | AdapterConfigSchema;
+  getConfigSchema?: (ctx?: AdapterCatalogContext) => Promise<AdapterConfigSchema> | AdapterConfigSchema;
+
+  /**
+   * Adapter supports agent-scoped catalog queries (Tier 2).
+   * When true, the server passes an AdapterCatalogContext resolved from the
+   * agent's persisted configuration and secrets into listModels/refreshModels/getConfigSchema.
+   */
+  supportsAgentScopedCatalog?: boolean;
 
   // ---------------------------------------------------------------------------
   // Adapter capability flags
