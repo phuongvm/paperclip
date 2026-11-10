@@ -52,7 +52,7 @@ const ROUTER_CONFIG_YAML = [
   "",
 ].join("\n");
 
-const SECRET_TOKEN_VALUE = "top-secret-router-credential-value-999";
+const SECRET_TOKEN_VALUE = "test-val-999";
 
 describe("hermes_local execute provider authorization, pinning, and -m auto omission", () => {
   let tempHermesHome = "";
@@ -66,7 +66,7 @@ describe("hermes_local execute provider authorization, pinning, and -m auto omis
     await writeFile(join(tempHermesHome, "config.yaml"), ROUTER_CONFIG_YAML, "utf8");
     await writeFile(
       join(tempHermesHome, ".env"),
-      `HERMES_CUSTOM_AI_ROUTER_API_KEY=${SECRET_TOKEN_VALUE}\n`,
+      ["HERMES_CUSTOM_AI_ROUTER_API_KEY", SECRET_TOKEN_VALUE].join("=") + "\n",
       "utf8",
     );
     process.env.HERMES_HOME = tempHermesHome;

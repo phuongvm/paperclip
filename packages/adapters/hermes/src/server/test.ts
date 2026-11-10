@@ -276,11 +276,11 @@ async function checkApiKeys(
       (detectedConfig?.keyEnv && has(detectedConfig.keyEnv)) ||
       hasProviderKeyEnv,
   );
-  const matchingHermesConfigApiKey =
+  const matchingHermesConfigKey =
     hasConfiguredKey &&
     (modelMatchesRequested || hasProviderKeyEnv);
 
-  if (matchingHermesConfigApiKey && detectedConfig) {
+  if (matchingHermesConfigKey && detectedConfig) {
     const providerLabel = detectedConfig.provider.trim();
 
     if (!providerLabel) {

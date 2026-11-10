@@ -60,4 +60,58 @@ describe("buildHermesConfig (RC-3 / RC-3b)", () => {
       persistSession: true,
     });
   });
+
+  it("transition matrix: normalizes selected option {providerId, rawModelId} into persisted {provider, model} without splitting raw slash ids", () => {
+    // Case 2: selecting option with id "ai-router/cc/claude-sonnet-5" on create
+    const c2 = buildHermesConfig({
+      ...makeValues({
+        model: "ai-router/cc/claude-sonnet-5",
+        adapterSchemaValues: { provider: "auto" },
+      }),
+      selectedAdapterModel: {
+        id: "ai-router/cc/claude-sonnet-5",
+        label: "cc/claude-sonnet-5",
+        providerId: "ai-router",
+        providerLabel: "9Router Proxy",
+        rawModelId: "cc/claude-sonnet-5",
+        isUserDefined: true,
+      },
+    } as any);
+    expect(c2).toMatchObject({
+      provider: "ai-router",
+      model: "cc/claude-sonnet-5",
+    });
+
+    // Case 7: selecting option with rawModelId "ai-router/native"
+    const c7 = buildHermesConfig({
+      ...makeValues({
+        model: "ai-router/ai-router/native",
+        adapterSchemaValues: { provider: "ai-router" },
+      }),
+      selectedAdapterModel: {
+        id: "ai-router/ai-router/native",
+        label: "ai-router/native",
+        providerId: "ai-router",
+        providerLabel: "9Router Proxy",
+        rawModelId: "ai-router/native",
+        isUserDefined: true,
+      },
+    } as any);
+    expect(c7).toMatchObject({
+      provider: "ai-router",
+      model: "ai-router/native",
+    });
+
+    // Case 3: free text "anthropic/claude-sonnet-4" with provider "auto" stays verbatim
+    const c3 = buildHermesConfig(
+      makeValues({
+        model: "anthropic/claude-sonnet-4",
+        adapterSchemaValues: { provider: "auto" },
+      }),
+    );
+    expect(c3).toMatchObject({
+      provider: "auto",
+      model: "anthropic/claude-sonnet-4",
+    });
+  });
 });

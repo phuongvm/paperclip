@@ -4,9 +4,18 @@ import { join } from "node:path";
 import { afterEach, describe, expect, test } from "vitest";
 
 import { VALID_PROVIDERS } from "../shared/constants.js";
-import { computePolicy, normalizeSlug, parseHermesProvidersAndModels } from "./catalog.js";
-import { parseModelFromConfig, resolveProvider } from "./detect-model.js";
-import { resolveHermesInvocation } from "./resolver.js";
+import { createServerAdapter } from "../index.js";
+import {
+  computePolicy,
+  normalizeSlug,
+  parseHermesProvidersAndModels,
+} from "./catalog.js";
+import { parseModelFromConfig, resolveHermesHome, resolveProvider } from "./detect-model.js";
+import {
+  composeHermesOptionId,
+  resolveHermesInvocation,
+  selectionFromOption,
+} from "./resolver.js";
 import { testEnvironment } from "./test.js";
 
 const providerEnvKeys = [
@@ -290,8 +299,8 @@ async function withCustomHermesHome(
     await writeFile(
       join(customHermesHome, ".env"),
       [
-        "HERMES_CUSTOM_AI_ROUTER_API_KEY=redacted-test-router-token",
-        "HERMES_CUSTOM_HEADROOM_PROXY_API_KEY=redacted-test-headroom-token",
+        "HERMES_CUSTOM_AI_ROUTER_API_KEY=test-key-1",
+        "HERMES_CUSTOM_HEADROOM_PROXY_API_KEY=test-key-2",
       ].join("\n") + "\n",
       "utf8",
     );
@@ -649,6 +658,346 @@ describe("effective provider", () => {
         pinned: false,
         resolvedFrom: "auto",
         warnings: [],
+      });
+    });
+  });
+});
+
+describe("catalog", () => {
+  test("parses dict and list models, skips enabled:false, supports legacy custom_providers, promotes default first, and never emits secret fields", async () => {
+    const yamlWithLegacy = [
+      ROUTER_CONFIG_YAML.trimEnd(),
+      "custom_providers:",
+      "  custom-legacy:",
+      "    name: Custom Legacy Provider",
+      "    enabled: true",
+      "    base_url: http://127.0.0.1:9000/v1",
+      "    api_key: inline-key-1",
+      "    key_env: CUSTOM_LEGACY_KEY_ENV",
+      "    models:",
+      "      - legacy-custom-m1",
+      "",
+    ].join("\n");
+
+    await withCustomHermesHome(yamlWithLegacy, async (hermesHome) => {
+      const resolvedPath = resolveHermesHome();
+      expect(resolvedPath).toBe(hermesHome);
+      expect(resolvedPath).not.toContain(".hermes");
+
+      const catalog = parseHermesProvidersAndModels(hermesHome);
+      expect(catalog.defaultProviderReadable).toBe(true);
+      expect(catalog.defaultProvider).toBe("ai-router");
+      expect(catalog.defaultModel).toBe("cb-gemini-flash-high");
+      expect(catalog.configuredProviders).toEqual([
+        "ai-router",
+        "headroom-proxy",
+        "custom-legacy",
+      ]);
+      expect(catalog.configuredProviders).not.toContain("legacy-router");
+      expect(catalog.modelsByProvider["ai-router"]).toEqual([
+        "cb-gemini-flash-high",
+        "cc/claude-sonnet-5",
+        "ai-router/native",
+      ]);
+      expect(catalog.modelsByProvider["headroom-proxy"]).toEqual([
+        "cb-gemini-flash-high",
+        "cc/claude-sonnet-5",
+        "cb-opus-4.6-thinking",
+      ]);
+      expect(catalog.modelsByProvider["custom-legacy"]).toEqual(["legacy-custom-m1"]);
+
+      const serialized = JSON.stringify(catalog);
+      expect(serialized).not.toContain("inline-key-1");
+      expect(serialized).not.toContain("test-key-1");
+      expect(serialized).not.toContain("api_key");
+      expect(serialized).not.toContain("apiKey");
+
+      const adapter = createServerAdapter();
+      expect(typeof adapter.listModels).toBe("function");
+      expect(typeof adapter.refreshModels).toBe("function");
+
+      const models = await adapter.listModels!();
+      expect(models[0]).toEqual({
+        id: "ai-router/cb-gemini-flash-high",
+        label: "cb-gemini-flash-high",
+        providerId: "ai-router",
+        providerLabel: "9Router Proxy",
+        rawModelId: "cb-gemini-flash-high",
+        isUserDefined: true,
+      });
+      expect(
+        models.every(
+          (m: any) =>
+            typeof m.providerId === "string" &&
+            typeof m.providerLabel === "string" &&
+            typeof m.rawModelId === "string" &&
+            m.isUserDefined === true,
+        ),
+      ).toBe(true);
+    });
+  });
+
+  test("records defaultProviderReadable=false on malformed YAML without throwing and uses mtime cache bypassed by refreshModels", async () => {
+    await withCustomHermesHome(":::malformed yaml\t[unclosed", async (hermesHome) => {
+      const badCatalog = parseHermesProvidersAndModels(hermesHome);
+      expect(badCatalog.defaultProviderReadable).toBe(false);
+      expect(badCatalog.configuredProviders).toEqual([]);
+
+      const adapter = createServerAdapter();
+      await expect(adapter.listModels!()).resolves.toEqual([]);
+    });
+
+    await withCustomHermesHome(ROUTER_CONFIG_YAML, async (hermesHome) => {
+      const adapter = createServerAdapter();
+      const firstList = await adapter.listModels!();
+      expect(firstList.map((m) => m.id)).not.toContain("ai-router/newly-added-model");
+
+      const updatedYaml = ROUTER_CONFIG_YAML.replace(
+        "      ai-router/native:\n        name: Native Router Model",
+        "      ai-router/native:\n        name: Native Router Model\n      newly-added-model:\n        name: Newly Added Model",
+      );
+      await writeFile(join(hermesHome, "config.yaml"), updatedYaml, "utf8");
+
+      const refreshedList = await adapter.refreshModels!();
+      expect(refreshedList.map((m) => m.id)).toContain("ai-router/newly-added-model");
+    });
+  });
+});
+
+describe("transition matrix", () => {
+  test("covers all 9 cases of the D2 transition matrix including Case 9 ambiguous legacy composite, Case 7 ai-router/native verbatim, Case 5 warning, and multi-catalog tie-break", async () => {
+    await withCustomHermesHome(ROUTER_CONFIG_YAML, async (hermesHome) => {
+      const catalog = parseHermesProvidersAndModels(hermesHome);
+      const policy = computePolicy(catalog, process.env);
+
+      // Case 1: Create pick ai-router + cb-gemini-flash-high
+      const opt1 = {
+        id: "ai-router/cb-gemini-flash-high",
+        label: "cb-gemini-flash-high",
+        providerId: "ai-router",
+        providerLabel: "9Router Proxy",
+        rawModelId: "cb-gemini-flash-high",
+        isUserDefined: true,
+      };
+      expect(selectionFromOption(opt1)).toEqual({
+        provider: "ai-router",
+        model: "cb-gemini-flash-high",
+      });
+      expect(
+        composeHermesOptionId(
+          { provider: "ai-router", model: "cb-gemini-flash-high" },
+          catalog,
+        ),
+      ).toBe("ai-router/cb-gemini-flash-high");
+      expect(
+        resolveHermesInvocation({
+          configProvider: "ai-router",
+          configModel: "cb-gemini-flash-high",
+          catalog,
+          policy,
+        }),
+      ).toMatchObject({
+        ok: true,
+        provider: "ai-router",
+        model: "cb-gemini-flash-high",
+        pinned: true,
+      });
+
+      // Case 2: Slash model cc/claude-sonnet-5 under ai-router (never anthropic)
+      const opt2 = {
+        id: "ai-router/cc/claude-sonnet-5",
+        label: "cc/claude-sonnet-5",
+        providerId: "ai-router",
+        providerLabel: "9Router Proxy",
+        rawModelId: "cc/claude-sonnet-5",
+        isUserDefined: true,
+      };
+      expect(selectionFromOption(opt2)).toEqual({
+        provider: "ai-router",
+        model: "cc/claude-sonnet-5",
+      });
+      expect(
+        resolveHermesInvocation({
+          configProvider: "ai-router",
+          configModel: "cc/claude-sonnet-5",
+          catalog,
+          policy,
+        }),
+      ).toMatchObject({
+        ok: true,
+        provider: "ai-router",
+        model: "cc/claude-sonnet-5",
+        pinned: true,
+      });
+
+      // Case 3: Free text anthropic/claude-sonnet-4 with provider auto (built-in prefix never decoded under router policy)
+      expect(
+        resolveHermesInvocation({
+          configProvider: "auto",
+          configModel: "anthropic/claude-sonnet-4",
+          catalog,
+          policy,
+        }),
+      ).toMatchObject({
+        ok: true,
+        provider: "ai-router",
+        model: "anthropic/claude-sonnet-4",
+        pinned: true,
+      });
+
+      // Case 4: Provider switched ai-router -> headroom-proxy when model is in both
+      expect(
+        resolveHermesInvocation({
+          configProvider: "headroom-proxy",
+          configModel: "cb-gemini-flash-high",
+          catalog,
+          policy,
+        }),
+      ).toMatchObject({
+        ok: true,
+        provider: "headroom-proxy",
+        model: "cb-gemini-flash-high",
+        pinned: true,
+        warnings: [],
+      });
+
+      // Case 5: Provider switched to one lacking the model -> sent verbatim (Rule A) + hermes_model_not_in_provider_catalog warning
+      const case5 = resolveHermesInvocation({
+        configProvider: "ai-router",
+        configModel: "cb-opus-4.6-thinking",
+        catalog,
+        policy,
+      });
+      expect(case5).toEqual({
+        ok: true,
+        provider: "ai-router",
+        model: "cb-opus-4.6-thinking",
+        pinned: true,
+        resolvedFrom: "adapterConfig",
+        warnings: ["hermes_model_not_in_provider_catalog"],
+      });
+
+      // Case 6: Model "" or "auto" -> -m omitted, --provider ai-router pinned
+      for (const emptyOrAuto of ["", "auto"]) {
+        expect(
+          resolveHermesInvocation({
+            configProvider: "auto",
+            configModel: emptyOrAuto,
+            catalog,
+            policy,
+          }),
+        ).toEqual({
+          ok: true,
+          provider: "ai-router",
+          model: undefined,
+          pinned: true,
+          resolvedFrom: "hermesConfig",
+          warnings: [],
+        });
+      }
+
+      // Case 7: Round-trip raw id starting with a slug {provider: "ai-router", model: "ai-router/native"} -> verbatim (Rule A, never split)
+      expect(
+        resolveHermesInvocation({
+          configProvider: "ai-router",
+          configModel: "ai-router/native",
+          catalog,
+          policy,
+        }),
+      ).toEqual({
+        ok: true,
+        provider: "ai-router",
+        model: "ai-router/native",
+        pinned: true,
+        resolvedFrom: "adapterConfig",
+        warnings: [],
+      });
+
+      // Case 8: Pick headroom-proxy/cb-gemini-flash-high, then change Provider select to ai-router (last explicit write wins)
+      const picked = selectionFromOption({
+        id: "headroom-proxy/cb-gemini-flash-high",
+        label: "cb-gemini-flash-high",
+        providerId: "headroom-proxy",
+        providerLabel: "Headroom Proxy",
+        rawModelId: "cb-gemini-flash-high",
+        isUserDefined: true,
+      });
+      const overridden = { ...picked, provider: "ai-router" };
+      expect(
+        resolveHermesInvocation({
+          configProvider: overridden.provider,
+          configModel: overridden.model,
+          catalog,
+          policy,
+        }),
+      ).toMatchObject({
+        ok: true,
+        provider: "ai-router",
+        model: "cb-gemini-flash-high",
+      });
+
+      // Multi-catalog tie-break when provider omitted and model is in both ai-router and headroom-proxy -> host default (ai-router) wins
+      expect(
+        resolveHermesInvocation({
+          configProvider: undefined,
+          configModel: "cb-gemini-flash-high",
+          catalog,
+          policy,
+        }),
+      ).toMatchObject({
+        ok: true,
+        provider: "ai-router",
+        model: "cb-gemini-flash-high",
+        resolvedFrom: "hermesConfig",
+      });
+
+      // Rule B legacy composite decode when provider omitted and raw id is NOT in any allowed catalog
+      const legacyCatalog = {
+        ...catalog,
+        modelsByProvider: {
+          "ai-router": ["only-in-ai-router"],
+          "headroom-proxy": ["only-in-headroom"],
+        },
+      };
+      expect(
+        resolveHermesInvocation({
+          configProvider: undefined,
+          configModel: "ai-router/only-in-ai-router",
+          catalog: legacyCatalog,
+          policy,
+        }),
+      ).toEqual({
+        ok: true,
+        provider: "ai-router",
+        model: "only-in-ai-router",
+        pinned: true,
+        resolvedFrom: "legacyComposite",
+        warnings: [],
+      });
+
+      // Case 9 (R3-I01): legacy record {model: "ai-router/native"} with provider omitted, host default headroom-proxy lacks that id,
+      // and ai-router catalog has BOTH "ai-router/native" (direct member) and "native" (making Rule B decode also catalog-valid)
+      const case9Catalog = {
+        ...catalog,
+        defaultProvider: "headroom-proxy",
+        modelsByProvider: {
+          "ai-router": ["ai-router/native", "native", "cb-gemini-flash-high"],
+          "headroom-proxy": ["cb-gemini-flash-high"],
+        },
+      };
+      const case9 = resolveHermesInvocation({
+        configProvider: undefined,
+        configModel: "ai-router/native",
+        catalog: case9Catalog,
+        policy,
+      });
+      expect(case9).toEqual({
+        ok: true,
+        provider: "ai-router",
+        model: "ai-router/native",
+        pinned: true,
+        resolvedFrom: "catalogMembership",
+        warnings: ["hermes_model_ambiguous_legacy_composite"],
       });
     });
   });

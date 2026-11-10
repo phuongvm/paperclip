@@ -337,6 +337,20 @@ function buildHermesCatalogFromContent(
     });
   }
 
+  if (parsed.defaultProvider) {
+    const defSlug = normalizeSlug(parsed.defaultProvider);
+    const cIdx = configuredProviders.indexOf(defSlug);
+    if (cIdx > 0) {
+      configuredProviders.splice(cIdx, 1);
+      configuredProviders.unshift(defSlug);
+    }
+    const pIdx = providers.findIndex((p) => p.id === defSlug);
+    if (pIdx > 0) {
+      const [promotedProvider] = providers.splice(pIdx, 1);
+      if (promotedProvider) providers.unshift(promotedProvider);
+    }
+  }
+
   const catalog: HermesCatalog = {
     defaultProvider: parsed.defaultProvider,
     defaultModel: parsed.defaultModel,

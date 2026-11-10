@@ -24,6 +24,8 @@ import {
   syncSkills,
   detectModel,
   getConfigSchema,
+  listModels,
+  refreshModels,
 } from "./server/index.js";
 import { resolveHermesCommand } from "./server/execute.js";
 
@@ -171,6 +173,8 @@ export function createServerAdapter(): ServerAdapterModule {
     listSkills,
     syncSkills,
     models,
+    listModels,
+    refreshModels,
     supportsLocalAgentJwt: true,
     supportsInstructionsBundle: true,
     instructionsPathKey: "instructionsFilePath",

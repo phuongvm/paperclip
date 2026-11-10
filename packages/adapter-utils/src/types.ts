@@ -298,6 +298,10 @@ export interface AdapterExecutionContext {
 export interface AdapterModel {
   id: string;
   label: string;
+  providerId?: string;
+  providerLabel?: string;
+  rawModelId?: string;
+  isUserDefined?: boolean;
 }
 
 export type AdapterEnvironmentCheckLevel = "info" | "warn" | "error";
