@@ -16,9 +16,11 @@ import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { promisify } from "node:util";
 
-import { HERMES_CLI, DEFAULT_MODEL, ADAPTER_TYPE, VALID_PROVIDERS } from "../shared/constants.js";
-import { detectModel, resolveHermesHome, resolveProvider, inferProviderFromModel } from "./detect-model.js";
+import { HERMES_CLI, ADAPTER_TYPE, VALID_PROVIDERS } from "../shared/constants.js";
+import { computePolicy, loadHermesCatalog, type HermesCatalog } from "./catalog.js";
+import { detectModel, resolveHermesHome, resolveProvider } from "./detect-model.js";
 import { resolveHermesCommand } from "./execute.js";
+import { resolveHermesInvocation } from "./resolver.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -200,6 +202,7 @@ function checkModel(
 async function checkApiKeys(
   config: Record<string, unknown>,
   detectedConfig: Awaited<ReturnType<typeof detectModel>> | null,
+  catalog?: HermesCatalog,
 ): Promise<AdapterEnvironmentCheck | null> {
   // The server resolves secret refs into config.env before calling testEnvironment,
   // so we check config.env first (adapter-configured secrets), then fall back to
@@ -265,13 +268,17 @@ async function checkApiKeys(
     !!detectedConfig?.model &&
     (!requestedModel || detectedConfig.model.toLowerCase() === requestedModel.toLowerCase());
 
+  const hasProviderKeyEnv = Boolean(
+    catalog?.providers.some((p) => p.keyEnv && has(p.keyEnv)),
+  );
   const hasConfiguredKey = Boolean(
     detectedConfig?.hasApiKey ||
-      (detectedConfig?.keyEnv && has(detectedConfig.keyEnv)),
+      (detectedConfig?.keyEnv && has(detectedConfig.keyEnv)) ||
+      hasProviderKeyEnv,
   );
   const matchingHermesConfigApiKey =
     hasConfiguredKey &&
-    modelMatchesRequested;
+    (modelMatchesRequested || hasProviderKeyEnv);
 
   if (matchingHermesConfigApiKey && detectedConfig) {
     const providerLabel = detectedConfig.provider.trim();
@@ -317,11 +324,53 @@ async function checkApiKeys(
 async function checkProviderConsistency(
   config: Record<string, unknown>,
   detectedConfig: Awaited<ReturnType<typeof detectModel>> | null,
-): Promise<AdapterEnvironmentCheck | null> {
+  catalog: HermesCatalog,
+): Promise<AdapterEnvironmentCheck[]> {
+  const checks: AdapterEnvironmentCheck[] = [];
   const model = asString(config.model);
-  if (!model) return null;
-
   const explicitProvider = asString(config.provider);
+  const policy = computePolicy(catalog, process.env);
+
+  const resolution = resolveHermesInvocation({
+    configModel: model,
+    configProvider: explicitProvider,
+    catalog,
+    policy,
+  });
+
+  if (!resolution.ok) {
+    checks.push({
+      level: "error",
+      message: `Provider authorization failed (${resolution.errorCode}): provider="${resolution.provider ?? "unverified"}"${resolution.reason ? ` reason=${resolution.reason}` : ""}`,
+      hint: "Select an allowed provider from your Hermes configuration or update PAPERCLIP_HERMES_ALLOWED_PROVIDERS.",
+      code: resolution.errorCode,
+    });
+    return checks;
+  }
+
+  for (const warningCode of resolution.warnings) {
+    if (warningCode === "hermes_model_not_in_provider_catalog") {
+      checks.push({
+        level: "warn",
+        message: `Model "${model ?? ""}" is not listed in the catalog for provider "${resolution.provider ?? "auto"}"`,
+        hint: "The model will still be passed verbatim to Hermes at runtime.",
+        code: "hermes_model_not_in_provider_catalog",
+      });
+    } else if (warningCode === "hermes_model_ambiguous_legacy_composite") {
+      checks.push({
+        level: "warn",
+        message: `Model "${model ?? ""}" matches both a direct provider catalog entry and a legacy composite prefix; using the direct catalog entry`,
+        hint: "Save an explicit provider in the agent configuration to disambiguate.",
+        code: "hermes_model_ambiguous_legacy_composite",
+      });
+    }
+  }
+
+  if (!model) return checks;
+
+  if (policy.mode === "restrictive") {
+    return checks;
+  }
 
   const { provider: resolved, resolvedFrom } = resolveProvider({
     explicitProvider,
@@ -336,57 +385,62 @@ async function checkProviderConsistency(
   // If provider was explicitly set but doesn't match what Hermes config says,
   // that's worth flagging.
   if (explicitProvider && detectedConfig?.provider && explicitProvider !== detectedConfig.provider) {
-    return {
+    checks.push({
       level: "warn",
       message: `Provider mismatch: adapterConfig has "${explicitProvider}" but ~/.hermes/config.yaml has "${detectedConfig.provider}". Using adapterConfig value.`,
       hint: `Model "${model}" may not work correctly with provider "${explicitProvider}". Consider aligning with your Hermes config or removing the explicit provider to use auto-detection.`,
       code: "hermes_provider_mismatch",
-    };
+    });
+    return checks;
   }
 
   // If Hermes config matches the requested model but uses an adapter-unsupported
   // provider such as "custom", do not report a false provider inference.
   if (!explicitProvider && resolvedFrom.startsWith("hermesConfigUnsupported:")) {
     const unsupportedProvider = resolvedFrom.split(":", 2)[1] || detectedConfig?.provider || "unknown";
-    return {
+    checks.push({
       level: "info",
       message: `Hermes config uses unsupported adapter provider "${unsupportedProvider}" for model "${model}" — deferring to Hermes auto-detection`,
       hint: "Paperclip will avoid model-name provider inference here and let Hermes resolve the provider from ~/.hermes/config.yaml at runtime.",
       code: "hermes_provider_unsupported",
-    };
+    });
+    return checks;
   }
 
   // If matching Hermes config provides runtime signals without an explicit provider,
   // also defer to Hermes rather than inventing a provider from the model name.
   if (!explicitProvider && resolvedFrom === "hermesConfigRuntime") {
-    return {
+    checks.push({
       level: "info",
       message: `Hermes config provides runtime settings for model "${model}" without an explicit adapter provider — deferring to Hermes auto-detection`,
       hint: "Paperclip will avoid model-name provider inference here and let Hermes resolve the provider from ~/.hermes/config.yaml at runtime.",
       code: "hermes_provider_runtime_config",
-    };
+    });
+    return checks;
   }
 
   // If provider was auto-detected (not explicitly set), log what was resolved
   if (!explicitProvider && resolvedFrom !== "auto") {
-    return {
+    checks.push({
       level: "info",
       message: `Provider auto-detected as "${resolved}" (from ${resolvedFrom}) for model "${model}"`,
       code: "hermes_provider_detected",
-    };
+    });
+    return checks;
   }
 
   // If we couldn't resolve any provider, warn
   if (resolvedFrom === "auto" && !explicitProvider) {
-    return {
+    checks.push({
       level: "warn",
       message: `Could not determine provider for model "${model}" — will use Hermes auto-detection`,
       hint: "Set an explicit provider in the agent config or ensure ~/.hermes/config.yaml has a matching provider for this model.",
       code: "hermes_provider_unknown",
-    };
+    });
+    return checks;
   }
 
-  return null;
+  return checks;
 }
 
 // ---------------------------------------------------------------------------
@@ -464,13 +518,15 @@ export async function testEnvironment(
     // Non-fatal
   }
 
+  const catalog = await loadHermesCatalog(config);
+
   // 6. API keys (check config.env — server resolves secrets before calling us)
-  const apiKeyCheck = await checkApiKeys(config, detectedConfig);
+  const apiKeyCheck = await checkApiKeys(config, detectedConfig, catalog);
   if (apiKeyCheck) checks.push(apiKeyCheck);
 
-  // 7. Provider/model consistency
-  const providerCheck = await checkProviderConsistency(config, detectedConfig);
-  if (providerCheck) checks.push(providerCheck);
+  // 7. Provider/model consistency & authorization
+  const providerChecks = await checkProviderConsistency(config, detectedConfig, catalog);
+  checks.push(...providerChecks);
 
   // Determine overall status
   const hasErrors = checks.some((c) => c.level === "error");

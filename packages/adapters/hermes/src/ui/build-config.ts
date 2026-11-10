@@ -24,9 +24,16 @@ export function buildHermesConfig(
 ): Record<string, unknown> {
   const ac: Record<string, unknown> = {};
 
-  // Model
-  if (v.model.trim()) {
-    ac.model = v.model.trim();
+  if (v.adapterSchemaValues && typeof v.adapterSchemaValues === "object") {
+    Object.assign(ac, v.adapterSchemaValues);
+  }
+
+  // Model (never persist literal "auto")
+  const rawModel = typeof v.model === "string" ? v.model.trim() : "";
+  if (rawModel && rawModel.toLowerCase() !== "auto") {
+    ac.model = rawModel;
+  } else if ("model" in ac && String(ac.model ?? "").trim().toLowerCase() === "auto") {
+    delete ac.model;
   }
 
   // NOTE: Provider is NOT set here because the Paperclip UI form
