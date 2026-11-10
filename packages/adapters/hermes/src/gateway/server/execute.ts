@@ -27,6 +27,11 @@ import {
   isRemotePlainHttp,
   remotePlainHttpDeniedMessage,
 } from "./transport-security.js";
+import { resolveGatewayTarget } from "./target.js";
+import {
+  buildRunSelection,
+  fetchGatewayModelOptionsCatalog,
+} from "./model-options.js";
 
 type SessionKeyStrategy = "issue" | "agent" | "run" | "none";
 
@@ -390,19 +395,30 @@ function buildInput(ctx: AdapterExecutionContext, paperclipApiUrl: string | null
   return lines.filter((line) => line !== null && line !== undefined).join("\n").trim();
 }
 
-function buildRunBody(ctx: AdapterExecutionContext, sessionKey: string | null): Record<string, unknown> {
+function buildRunBody(
+  ctx: AdapterExecutionContext,
+  sessionKey: string | null,
+  selection?: { provider?: string; model?: string; model_options?: Record<string, unknown> },
+): Record<string, unknown> {
   const paperclipApiUrl = nonEmpty(ctx.config.paperclipApiUrl);
-  const payloadTemplate = parseObject(ctx.config.payloadTemplate);
-  const configuredInput = nonEmpty(payloadTemplate.input);
+  const rawPayloadTemplate = parseObject(ctx.config.payloadTemplate);
+  const {
+    provider: _tplProvider,
+    model: _tplModel,
+    profile: _tplProfile,
+    ...payloadTemplate
+  } = rawPayloadTemplate;
+  const configuredInput = nonEmpty(rawPayloadTemplate.input);
   const input = configuredInput && ctx.context.conversationMode === true
     ? `${configuredInput}\n\n${buildInput(ctx, paperclipApiUrl)}`
     : configuredInput ?? buildInput(ctx, paperclipApiUrl);
   const instructions =
     nonEmpty(ctx.config.instructions) ??
-    nonEmpty(payloadTemplate.instructions) ??
+    nonEmpty(rawPayloadTemplate.instructions) ??
     "Follow the Paperclip wake instructions exactly. Do not expose secrets in logs, comments, or final output.";
   return {
     ...payloadTemplate,
+    ...(selection ?? {}),
     input,
     instructions,
     ...(sessionKey ? { session_id: sessionKey } : {}),
@@ -902,17 +918,25 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     };
   }
 
-  const baseUrl = normalizeBaseUrl(apiBaseUrlValue);
-  if (!baseUrl) {
+  const target = resolveGatewayTarget(ctx.config);
+  if (!target.ok) {
+    const errorCode =
+      target.errorCode === "hermes_gateway_url_invalid"
+        ? "hermes_gateway_api_base_url_invalid"
+        : target.errorCode;
     return {
       exitCode: 1,
       signal: null,
       timedOut: false,
-      errorCode: "hermes_gateway_api_base_url_invalid",
-      errorMessage: `Invalid Hermes gateway apiBaseUrl: ${apiBaseUrlValue}`,
+      errorCode,
+      errorMessage:
+        target.errorCode === "hermes_gateway_url_invalid"
+          ? `Invalid Hermes gateway apiBaseUrl: ${apiBaseUrlValue}`
+          : target.message,
       resultJson: { connectionFailure: gatewayConfigurationFailure("endpoint_invalid") },
     };
   }
+  const baseUrl = target.root;
   if (isRemotePlainHttp(baseUrl) && !allowsInsecureRemoteHttp(ctx.config)) {
     return {
       exitCode: 1,
@@ -934,6 +958,41 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       errorMessage: "Hermes gateway adapter requires apiKey.",
       resultJson: { connectionFailure: gatewayConfigurationFailure("credentials_missing") },
     };
+  }
+
+  const rawPayloadTemplate = parseObject(ctx.config.payloadTemplate);
+  const hasSelectionConfig =
+    ctx.config.provider !== undefined ||
+    ctx.config.model !== undefined ||
+    rawPayloadTemplate.provider !== undefined ||
+    rawPayloadTemplate.model !== undefined ||
+    Boolean(process.env.PAPERCLIP_HERMES_ALLOWED_PROVIDERS?.trim()) ||
+    Boolean(process.env.PAPERCLIP_HERMES_GATEWAY_URL?.trim());
+
+  let runSelection:
+    | { provider?: string; model?: string; model_options?: Record<string, unknown> }
+    | undefined;
+  if (hasSelectionConfig) {
+    const catalogRes = await fetchGatewayModelOptionsCatalog({
+      apiBaseUrl: apiBaseUrlValue,
+      profile: target.profile,
+      authHeader: `Bearer ${apiKey}`,
+    });
+    const sel = buildRunSelection(ctx.config, catalogRes.parsed?.catalog ?? null);
+    if (!sel.ok) {
+      await ctx.onLog(
+        "stderr",
+        `[hermes-gateway] provider authorization failed: code=${sel.errorCode} provider=${sel.provider ?? "auto"} resolvedFrom=${sel.resolvedFrom ?? "unknown"}\n`,
+      );
+      return {
+        exitCode: 1,
+        signal: null,
+        timedOut: false,
+        errorCode: sel.errorCode,
+        errorMessage: `Hermes gateway provider validation failed (${sel.errorCode}${sel.provider ? `: ${sel.provider}` : ""}).`,
+      };
+    }
+    runSelection = sel.selection;
   }
 
   const timeoutSec = parseNonNegativeNumber(ctx.config.timeoutSec, DEFAULT_TIMEOUT_SEC);
@@ -970,8 +1029,9 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     runHeaders.Authorization,
     runHeaders["X-Hermes-Session-Key"],
   ]);
-  const body = buildRunBody(ctx, sessionKey);
-  const createRunUrl = apiUrl(baseUrl, "/v1/runs");
+  const body = buildRunBody(ctx, sessionKey, runSelection);
+  const createRunUrl = target.url("/v1/runs");
+  const targetBaseUrl = new URL(target.url(""));
 
   await ctx.onMeta?.({
     adapterType: ADAPTER_TYPE,
@@ -1020,7 +1080,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   const controller = new AbortController();
   void consumeEvents({
     ctx,
-    baseUrl,
+    baseUrl: targetBaseUrl,
     headers: eventHeaders,
     state,
     signal: controller.signal,
@@ -1029,7 +1089,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   }).catch(() => undefined);
   void pollStatus({
     ctx,
-    baseUrl,
+    baseUrl: targetBaseUrl,
     headers: eventHeaders,
     state,
     signal: controller.signal,
@@ -1048,8 +1108,8 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   controller.abort();
 
   if (outcome === "timeout") {
-    await stopRun({ ctx, baseUrl, headers: eventHeaders, runId, redactText });
-    const finalStatus = await fetchFinalStatus({ baseUrl, headers: eventHeaders, runId, deadlineMs: STOP_GRACE_MS });
+    await stopRun({ ctx, baseUrl: targetBaseUrl, headers: eventHeaders, runId, redactText });
+    const finalStatus = await fetchFinalStatus({ baseUrl: targetBaseUrl, headers: eventHeaders, runId, deadlineMs: STOP_GRACE_MS });
     return {
       exitCode: 1,
       signal: null,

@@ -2,6 +2,7 @@ import { configFieldsForSection } from "../config-sections";
 import { useEffect, useState } from "react";
 import { Eye, EyeOff } from "lucide-react";
 import type { AdapterConfigFieldsProps, CreateConfigValues } from "../types";
+import { useConfigSchema } from "../schema-config-fields";
 import {
   DraftInput,
   DraftNumberInput,
@@ -9,6 +10,8 @@ import {
   Field,
   ToggleField,
 } from "../../components/agent-config-primitives";
+
+const GATEWAY_PROFILE_GRAMMAR = /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/;
 
 const inputClass =
   "w-full rounded-md border border-border px-2.5 py-1.5 bg-transparent outline-none text-sm font-mono placeholder:text-muted-foreground/40";
@@ -130,6 +133,9 @@ export function HermesGatewayConfigFields({
   };
 
   const apiBaseUrl = String(readValue("apiBaseUrl", "") ?? "");
+  const profile = String(readValue("profile", "") ?? "");
+  const provider = String(readValue("provider", "auto") ?? "auto") || "auto";
+  const model = String(readValue("model", "") ?? "");
   const paperclipApiUrl = String(readValue("paperclipApiUrl", "") ?? "");
   const sessionKeyStrategy = String(readValue("sessionKeyStrategy", DEFAULT_SESSION_KEY_STRATEGY) ?? DEFAULT_SESSION_KEY_STRATEGY);
   const timeoutSec = Number(readValue("timeoutSec", DEFAULT_TIMEOUT_SEC) ?? DEFAULT_TIMEOUT_SEC);
@@ -139,6 +145,70 @@ export function HermesGatewayConfigFields({
   const headers = isCreate
     ? String(readCreateValue(values, "headers", "") ?? "")
     : headersDraft;
+
+  const tier1Schema = useConfigSchema("hermes_gateway");
+  const effectiveSchema = tier1Schema;
+  const providerField = effectiveSchema?.fields.find((f) => f.key === "provider");
+  const modelField = effectiveSchema?.fields.find((f) => f.key === "model");
+
+  const providerModels =
+    (modelField?.meta?.providerModels as Record<string, string[]> | undefined) ?? {};
+  const allowedProviders =
+    (modelField?.meta?.allowedProviders as string[] | undefined) ?? [];
+  const defaultProvider =
+    typeof modelField?.meta?.defaultProvider === "string"
+      ? modelField.meta.defaultProvider
+      : "";
+
+  const isDefaultAllowed =
+    !defaultProvider ||
+    allowedProviders.length === 0 ||
+    allowedProviders.includes(defaultProvider);
+
+  const rawProviderOptions = providerField?.options ?? [
+    { value: "auto", label: "Auto" },
+  ];
+
+  const [modelClearedNotice, setModelClearedNotice] = useState<string | null>(null);
+  const profileInvalid =
+    profile.trim().length > 0 && !GATEWAY_PROFILE_GRAMMAR.test(profile.trim());
+
+  const activeProviderSlug = provider === "auto" ? defaultProvider : provider;
+  const candidateModels = activeProviderSlug
+    ? providerModels[activeProviderSlug] ?? []
+    : [];
+
+  const handleProviderChange = (nextProvider: string) => {
+    const currentModel = String(readValue("model", "") ?? "");
+    let shouldClearModel = false;
+    if (currentModel && nextProvider !== "auto") {
+      const nextList = providerModels[nextProvider] ?? [];
+      if (!nextList.includes(currentModel)) {
+        shouldClearModel = true;
+      }
+    }
+
+    if (shouldClearModel) {
+      setModelClearedNotice(
+        `Model "${currentModel}" is not in ${nextProvider}'s catalog and was cleared.`,
+      );
+      if (isCreate) {
+        set?.({
+          adapterSchemaValues: {
+            ...values?.adapterSchemaValues,
+            provider: nextProvider,
+            model: "",
+          },
+        });
+      } else {
+        mark("adapterConfig", "provider", nextProvider);
+        mark("adapterConfig", "model", "");
+      }
+    } else {
+      setModelClearedNotice(null);
+      writeValue("provider", nextProvider);
+    }
+  };
 
   return configFieldsForSection(section, (
     <>
@@ -162,6 +232,106 @@ export function HermesGatewayConfigFields({
         placeholder="Hermes API_SERVER_KEY, not PAPERCLIP_API_KEY"
         stored={!isCreate && hasStoredApiKey && !editApiKeyValue}
       />
+
+      <Field
+        label="Profile"
+        hint="Optional Hermes profile slug (^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$). Routes requests through :8642/p/{profile} or :9119/api/p/{profile}."
+      >
+        <div className="space-y-1">
+          <input
+            data-testid="hermes-gateway-profile"
+            type="text"
+            value={profile}
+            onChange={(e) => writeValue("profile", e.target.value || undefined)}
+            className={inputClass}
+            placeholder="coder"
+          />
+          {profileInvalid && (
+            <p className="text-xs text-destructive">
+              Invalid profile slug. Must match ^[a-zA-Z0-9][a-zA-Z0-9_-]&#123;0,63&#125;$ (no slashes, spaces, or &quot;..&quot;).
+            </p>
+          )}
+        </div>
+      </Field>
+
+      <Field
+        label="Provider"
+        hint={
+          providerField?.hint ??
+          "Single-gateway-per-process Tier 1 catalog. Select 'Auto' or pin an allowed provider slug."
+        }
+      >
+        <div className="space-y-1">
+          <select
+            data-testid="hermes-gateway-provider"
+            value={provider}
+            onChange={(event) => handleProviderChange(event.target.value)}
+            className={inputClass}
+          >
+            {rawProviderOptions.map((opt) => {
+              if (opt.value === "auto") {
+                const autoLabel = defaultProvider
+                  ? isDefaultAllowed
+                    ? `Auto (${defaultProvider})`
+                    : `Auto (${defaultProvider} — host default not permitted)`
+                  : opt.label;
+                return (
+                  <option
+                    key="auto"
+                    value="auto"
+                    disabled={!isDefaultAllowed}
+                  >
+                    {autoLabel}
+                  </option>
+                );
+              }
+              return (
+                <option key={opt.value} value={opt.value}>
+                  {opt.label}
+                </option>
+              );
+            })}
+          </select>
+          {!isDefaultAllowed && (
+            <p className="text-xs text-amber-600 dark:text-amber-400">
+              Host default not permitted ({defaultProvider}); select an allowed provider.
+            </p>
+          )}
+        </div>
+      </Field>
+
+      <Field
+        label="Model"
+        hint="Raw model ID for the selected provider, or leave blank for the gateway default."
+      >
+        <div className="space-y-1">
+          <input
+            data-testid="hermes-gateway-model"
+            type="text"
+            list="hermes-gateway-model-options"
+            value={model}
+            onChange={(event) => {
+              setModelClearedNotice(null);
+              writeValue("model", event.target.value);
+            }}
+            className={inputClass}
+            placeholder={
+              typeof modelField?.meta?.defaultModel === "string" &&
+              modelField.meta.defaultModel
+                ? modelField.meta.defaultModel
+                : "cb-gemini-flash-high"
+            }
+          />
+          <datalist id="hermes-gateway-model-options">
+            {candidateModels.map((m) => (
+              <option key={m} value={m} />
+            ))}
+          </datalist>
+          {modelClearedNotice && (
+            <p className="text-xs text-muted-foreground">{modelClearedNotice}</p>
+          )}
+        </div>
+      </Field>
 
       <Field
         label="Paperclip API URL"

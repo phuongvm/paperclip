@@ -10,6 +10,11 @@ import {
   isRemotePlainHttp,
   remotePlainHttpDeniedMessage,
 } from "./transport-security.js";
+import { resolveGatewayTarget } from "./target.js";
+import {
+  buildRunSelection,
+  fetchGatewayModelOptionsCatalog,
+} from "./model-options.js";
 
 function summarizeStatus(checks: AdapterEnvironmentCheck[]): AdapterEnvironmentTestResult["status"] {
   if (checks.some((check) => check.level === "error")) return "fail";
@@ -71,14 +76,25 @@ export async function testEnvironment(
     });
   }
 
-  const parsed = apiBaseUrl ? normalizeBaseUrl(apiBaseUrl) : null;
-  const mappedDefaultDashboardRoot = Boolean(parsed && isDefaultDashboardApiEntry(new URL(apiBaseUrl)));
-  if (apiBaseUrl && !parsed) {
-    checks.push({
-      code: "hermes_gateway_api_base_url_invalid",
-      level: "error",
-      message: "apiBaseUrl must be an http:// or https:// URL.",
-    });
+  const target = apiBaseUrl ? resolveGatewayTarget(ctx.config) : null;
+  const parsed = target && target.ok ? target.root : null;
+  const mappedDefaultDashboardRoot = Boolean(
+    target && target.ok && target.mappedDefaultDashboardRoot,
+  );
+  if (apiBaseUrl && target && !target.ok) {
+    if (target.errorCode === "hermes_gateway_url_invalid") {
+      checks.push({
+        code: "hermes_gateway_api_base_url_invalid",
+        level: "error",
+        message: "apiBaseUrl must be an http:// or https:// URL.",
+      });
+    } else {
+      checks.push({
+        code: target.errorCode,
+        level: "error",
+        message: target.message,
+      });
+    }
   }
 
   if (!apiKey) {
@@ -121,7 +137,7 @@ export async function testEnvironment(
     });
   }
 
-  if (checks.some((check) => check.level === "error") || !parsed || !apiKey) {
+  if (checks.some((check) => check.level === "error") || !target || !target.ok || !parsed || !apiKey) {
     return {
       adapterType: ctx.adapterType,
       status: summarizeStatus(checks),
@@ -131,7 +147,7 @@ export async function testEnvironment(
   }
 
   try {
-    const healthUrl = apiUrl(parsed, "/health");
+    const healthUrl = target.url("/health");
     const response = await fetch(healthUrl, {
       method: "GET",
       headers: {
@@ -158,6 +174,46 @@ export async function testEnvironment(
       detail: errorDetail(err),
       hint: "Check apiBaseUrl and make sure the Hermes API server is running where Paperclip can reach it.",
     });
+  }
+
+  const hasSelectionConfig =
+    ctx.config.provider !== undefined ||
+    ctx.config.model !== undefined ||
+    Boolean(process.env.PAPERCLIP_HERMES_ALLOWED_PROVIDERS?.trim()) ||
+    Boolean(process.env.PAPERCLIP_HERMES_GATEWAY_URL?.trim());
+
+  if (hasSelectionConfig && !checks.some((c) => c.level === "error")) {
+    const catalogRes = await fetchGatewayModelOptionsCatalog({
+      apiBaseUrl,
+      profile: target.profile,
+      authHeader: `Bearer ${apiKey}`,
+    });
+
+    if (catalogRes.failure?.reason === "unauthorized") {
+      checks.push({
+        code: "hermes_gateway_catalog_unauthorized",
+        level: "error",
+        message: "Hermes Gateway /api/model/options rejected the configured apiKey (HTTP 401/403).",
+        hint: "Verify adapterConfig.apiKey matches the gateway's API_SERVER_KEY.",
+      });
+    } else {
+      const sel = buildRunSelection(ctx.config, catalogRes.parsed?.catalog ?? null);
+      if (!sel.ok) {
+        checks.push({
+          code: sel.errorCode,
+          level: "error",
+          message: `Hermes gateway provider validation failed (${sel.errorCode}${sel.provider ? `: ${sel.provider}` : ""}).`,
+        });
+      } else {
+        for (const w of sel.warnings) {
+          checks.push({
+            code: w,
+            level: "warn",
+            message: `Hermes gateway model warning: ${w}`,
+          });
+        }
+      }
+    }
   }
 
   return {
