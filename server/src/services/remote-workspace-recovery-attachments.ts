@@ -2,7 +2,7 @@ import { lstat, mkdir, mkdtemp, readFile, realpath, rename, rm, writeFile } from
 import path from "node:path";
 import os from "node:os";
 import type { AdapterSandboxExecutionTarget } from "@paperclipai/adapter-utils/execution-target";
-import { hasRemoteRecoveryAttachment } from "./remote-workspace-transport.js";
+import { hasRemoteRecoveryAttachment, removeRemoteRecoveryAttachment } from "./remote-workspace-transport.js";
 import { removeTaskDirectoryTree } from "./isolated-task-directory-snapshot.js";
 import { LEGACY_WORKSPACE_RECOVERY_MIGRATION } from "./legacy-workspace-recovery-migration.js";
 import { and, eq, inArray, sql } from "drizzle-orm";
@@ -21,7 +21,7 @@ import { getStorageService, type StorageService } from "../storage/index.js";
  * its own files stay intact; this does not grant execution or replay authority. */
 export async function attachPreservedRemoteWorkspaceSnapshots(input: {
   db: Db; companyId: string; issueId: string; runId: string; workspaceId: string;
-  sourceRunIds: string[]; cwd: string; storage?: StorageService;
+  sourceRunIds: string[]; cwd: string; storage?: StorageService; retiredOperationIds?: ReadonlySet<string>;
 }) {
   const [writer] = await input.db.select().from(heartbeatRuns).where(and(
     eq(heartbeatRuns.companyId, input.companyId), eq(heartbeatRuns.id, input.runId),
@@ -57,10 +57,13 @@ export async function attachPreservedRemoteWorkspaceSnapshots(input: {
     if (remote.workspaceId === input.workspaceId || remote.state !== "saved" || !remote.snapshotId) continue;
     const proof = await immutableRemoteWorkspaceRecoveryAttachment(input.db, source);
     if (!proof) {
-      if (hasRequiredWorkspaceRecovery(source.resultJson)) throw new Error("remote_workspace_recovery_receipt_invalid");
+      if (hasRequiredWorkspaceRecovery(source.resultJson) && !await savedOnlyItsRestoredSnapshot(input.db, source, remote)) {
+        throw new Error("remote_workspace_recovery_receipt_invalid");
+      }
       continue;
     }
     const operationId = proof.operationId;
+    if (input.retiredOperationIds?.has(operationId)) continue;
     await assertExecutionWorkspaceRecordAccess(input.db, { type: "agent", source: "agent_jwt",
       companyId: input.companyId, agentId: writer.agentId, runId: writer.id,
       onBehalfOfUserId: writer.responsibleUserId === "local-board" ? null : writer.responsibleUserId },
@@ -98,6 +101,29 @@ export async function attachPreservedRemoteWorkspaceSnapshots(input: {
     result.push({ operationId, path: destination, sourceRunId: source.id });
   }
   return result;
+}
+
+/** A run that restored a committed save and then failed (for example before
+ * provider work, after a restart) can keep a restore hold that never received a
+ * recovery receipt. When its saved reference names the very snapshot that its
+ * own succeeded restore loaded, at the same epoch, it saved nothing else: no
+ * unsaved file exists to attach, and the last save already holds its files.
+ * Any other saved snapshot still needs the canonical receipt. */
+async function savedOnlyItsRestoredSnapshot(db: Db, source: typeof heartbeatRuns.$inferSelect,
+  remote: { workspaceId: string; snapshotId?: string | null; epoch: number }): Promise<boolean> {
+  if (!remote.snapshotId) return false;
+  const [restore] = await db.select({ id: workspaceOperations.id }).from(workspaceOperations).where(and(
+    eq(workspaceOperations.companyId, source.companyId), eq(workspaceOperations.heartbeatRunId, source.id),
+    eq(workspaceOperations.phase, "remote_workspace_restore"), eq(workspaceOperations.status, "succeeded"),
+    sql`${workspaceOperations.metadata}->>'snapshotId' = ${remote.snapshotId}`,
+    sql`${workspaceOperations.metadata}->>'epoch' = ${String(remote.epoch)}`,
+  )).limit(1);
+  if (!restore) return false;
+  const [snapshot] = await db.select({ id: executionWorkspaceSnapshots.id }).from(executionWorkspaceSnapshots).where(and(
+    eq(executionWorkspaceSnapshots.companyId, source.companyId), eq(executionWorkspaceSnapshots.executionWorkspaceId, remote.workspaceId),
+    eq(executionWorkspaceSnapshots.id, remote.snapshotId), inArray(executionWorkspaceSnapshots.status, ["committed", "superseded"]),
+  )).limit(1);
+  return Boolean(snapshot);
 }
 
 /** Verify a sidecar already inside an authorized shared workspace. This only
@@ -152,6 +178,25 @@ async function retainedRecoveryAttachmentProvenance(input: {
   return provenance && (historyAllowed || await input.verifySelectedSnapshot(input.operationId, provenance)) ? provenance : null;
 }
 
+/** Recovered copies to remove: those already retired, and those shown to a
+ * run other than this one that then succeeded, which had its turn to use them. */
+export async function retiredRecoveryAttachments(db: Db,
+  workspace: Pick<typeof executionWorkspaces.$inferSelect, "companyId" | "metadata">, runId: string) {
+  const retired = new Set<string>();
+  const recorded = workspace.metadata?.remoteWorkspaceRecoveredFiles;
+  for (const value of Array.isArray(recorded) ? recorded : []) {
+    const item = record(value);
+    if (typeof item.operationId !== "string") continue;
+    if (item.retired === true) { retired.add(item.operationId); continue; }
+    const shownTo = item.presentedToRunId;
+    if (typeof shownTo !== "string" || shownTo === runId || !/^[a-f0-9-]{36}$/.test(shownTo)) continue;
+    const [run] = await db.select({ status: heartbeatRuns.status }).from(heartbeatRuns).where(and(
+      eq(heartbeatRuns.companyId, workspace.companyId), eq(heartbeatRuns.id, shownTo)));
+    if (run?.status === "succeeded") retired.add(item.operationId);
+  }
+  return retired;
+}
+
 function record(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
 }
@@ -161,8 +206,8 @@ function record(value: unknown): Record<string, unknown> {
 export async function retainRemoteRecoveryAttachments(input: {
   db: Db; workspace: Pick<typeof executionWorkspaces.$inferSelect, "id" | "companyId" | "sourceIssueId" | "metadata">;
   runId: string; remoteRoot: string; target: AdapterSandboxExecutionTarget; assertOwned?: () => Promise<void>;
-  recoveredFiles: Array<{ operationId: string; sourceRunId: string; path: string; provenance: string }>;
-  storage?: StorageService;
+  recoveredFiles: Array<{ operationId: string; sourceRunId: string; path: string; provenance: string; retired?: true }>;
+  retiredOperationIds: ReadonlySet<string>; storage?: StorageService;
 }) {
   let snapshotScratch: string | null = null, snapshotFiles: string | null = null, snapshotLoaded = false;
   const verifySelectedSnapshot = async (operationId: string, provenance: string) => {
@@ -211,7 +256,13 @@ export async function retainRemoteRecoveryAttachments(input: {
         if (!provenance) throw new Error("remote_workspace_recovery_receipt_invalid");
       }
       await input.assertOwned?.();
-      if (await hasRemoteRecoveryAttachment({ target: input.target, remoteCwd: input.remoteRoot, operationId: item.operationId, provenance }))
+      const location = { target: input.target, remoteCwd: input.remoteRoot, operationId: item.operationId, provenance };
+      if (input.retiredOperationIds.has(item.operationId)) {
+        await removeRemoteRecoveryAttachment(location);
+        input.recoveredFiles.push({ operationId: item.operationId, sourceRunId: item.sourceRunId, path: item.path, provenance, retired: true });
+        continue;
+      }
+      if (await hasRemoteRecoveryAttachment(location))
         input.recoveredFiles.push({ operationId: item.operationId, sourceRunId: item.sourceRunId, path: item.path, provenance });
     }
   } finally { if (snapshotScratch) await removeTaskDirectoryTree(snapshotScratch); }

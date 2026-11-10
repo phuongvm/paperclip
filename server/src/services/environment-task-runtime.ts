@@ -19,6 +19,19 @@ import { NativeExecutionContext } from "./native-runtime/native-execution-contex
 import { assertPluginTaskSourceAttachment, assertPluginTaskSourceRecovery } from "./native-runtime/plugin-task-source-recovery.js";
 import { pluginAgentRuntimeIdentity } from "./plugin-agent-runtime-state.js";
 
+export function isSettledReadyRunnerState(state: Record<string, unknown>): boolean {
+  const commands = state.processedCommands;
+  return state.schema === "paperclip.runner.durable.state.v1" && state.lifecycle === "ready" &&
+    Array.isArray(state.outbox) && state.outbox.length === 0 && Number.isSafeInteger(state.nextSourceSeq) &&
+    Number(state.nextSourceSeq) > 0 && state.ackedSourceSeq === Number(state.nextSourceSeq) - 1 &&
+    state.pendingTerminalDelivery == null && state.pendingProviderCleanup == null && state.warmTransition == null &&
+    commands !== null && typeof commands === "object" && !Array.isArray(commands) &&
+    Object.values(commands).every(command => {
+      const status = command !== null && typeof command === "object" ? (command as { status?: unknown }).status : undefined;
+      return typeof status === "string" && status !== "" && status !== "pending" && status !== "indeterminate";
+    });
+}
+
 export async function pluginEnvironmentSupportsTasks(db: Db, workers: PluginWorkerManager, lease: { companyId: string; metadata: Record<string, unknown> | null }) {
   const metadata = lease.metadata ?? {};
   if (metadata.driver !== "plugin" || typeof metadata.pluginId !== "string" || typeof metadata.driverKey !== "string") return false;
@@ -117,6 +130,7 @@ export async function executeEnvironmentTask(db: Db, workers: PluginWorkerManage
     || (activeProbe && (runner.sessionId !== probe.sessionId || (launches && operation.projectIds.length > 0))))) {
     throw new Error("Plugin-provided Runner execution identity mismatch");
   }
+  let stoppedSourceCheckpoint = false;
   if (runner && resumeFrom && !sourceRecovery) {
     const inspectCheckpoint = operation.kind === "read_state";
     const sources = await db.select({ id: environmentLeases.id, runId: environmentLeases.heartbeatRunId, metadata: environmentLeases.metadata }).from(environmentLeases).where(and(
@@ -146,6 +160,7 @@ export async function executeEnvironmentTask(db: Db, workers: PluginWorkerManage
         throw new Error("Plugin Runner retained session is not authorized");
       }
     }
+    stoppedSourceCheckpoint = true;
   }
   if (metadata.driver !== "plugin" || typeof metadata.pluginId !== "string" || typeof metadata.driverKey !== "string") {
     throw new Error("Plugin-provided Runner execution lease has no pinned plugin driver");
@@ -393,6 +408,9 @@ export async function executeEnvironmentTask(db: Db, workers: PluginWorkerManage
     const result = await callWorker("environmentTask", params, timeout);
     if (executionContext) context!.assertOpen();
     const parsed = parseEnvironmentTaskResult(operation, taskId, result);
+    if (stoppedSourceCheckpoint && parsed.kind === "state" && isSettledReadyRunnerState(parsed.state)) {
+      parsed.state = { ...parsed.state, lifecycle: "suspended" };
+    }
     if (sourceRecovery && (operation.kind === "prepare" || operation.kind === "submit")) {
       await assertPluginTaskSourceRecovery(db, { companyId: input.companyId, leaseId: lease.id,
         context: context instanceof NativeExecutionContext ? context : undefined, operation });
@@ -475,29 +493,42 @@ export async function executeEnvironmentTask(db: Db, workers: PluginWorkerManage
 }
 
 /** Failure leaves the dispatch marker and provider handle available to cleanup retries. */
-export async function settleDispatchedEnvironmentTask(db: Db, workers: PluginWorkerManager, lease: { id: string; companyId: string }) {
+export async function settleDispatchedEnvironmentTask(db: Db, workers: PluginWorkerManager, lease: { id: string; companyId: string },
+  options: { executionStopObserved?: boolean } = {}): Promise<false | "stopped" | "completed"> {
   const [current] = await db.update(environmentLeases).set({
     metadata: sql`coalesce(${environmentLeases.metadata}, '{}'::jsonb) || '{"runnerTaskRetiring":true}'::jsonb`,
   }).where(and(eq(environmentLeases.id, lease.id), eq(environmentLeases.companyId, lease.companyId)))
-    .returning({ metadata: environmentLeases.metadata, heartbeatRunId: environmentLeases.heartbeatRunId });
+    .returning({ metadata: environmentLeases.metadata, heartbeatRunId: environmentLeases.heartbeatRunId, taskId: environmentLeases.providerLeaseId });
   const startup = current?.metadata?.runnerTaskStartup;
   const startupCleanup = current?.metadata?.runnerTaskStartupCleanup as { requiresPreparationStop?: boolean } | undefined;
   if (current?.metadata?.runnerTaskDispatched !== true && !startup && !startupCleanup) {
-    if (current?.metadata) await settlePluginTaskCredentialHandoff(db, { companyId: lease.companyId, leaseId: lease.id }, current.metadata,
-      async () => { throw new Error("Undispatched task must not request credentials"); });
-    return current?.metadata?.runnerTaskExecutionStopped === true;
+    if (current?.metadata) await settlePluginTaskCredentialHandoff(db, {
+      companyId: lease.companyId, leaseId: lease.id, expectedTaskId: current.taskId ?? undefined,
+    }, current.metadata, async accountIdentity => {
+      const snapshot = await executeEnvironmentTask(db, workers, { companyId: lease.companyId, leaseId: lease.id,
+        expectedTaskId: current.taskId ?? undefined, operation: { kind: "credentials", accountIdentity } });
+      if (snapshot.kind !== "credentials") throw new Error("Plugin Runner credential snapshot unavailable");
+      return snapshot.credential;
+    });
+    return current?.metadata?.runnerTaskExecutionStopped === true ? "stopped" : false;
   }
   const scope = { companyId: lease.companyId, leaseId: lease.id };
   try {
     const contextId = (startupCleanup as { contextId?: unknown } | undefined)?.contextId ?? (startup as { contextId?: unknown } | undefined)?.contextId;
     const draining = typeof contextId === "string" ? workers.drainStartup?.(contextId) : undefined;
     void draining?.catch(() => undefined);
-    await executeEnvironmentTask(db, workers, { ...scope, operation: { kind: "stop" } });
-    const state = await executeEnvironmentTask(db, workers, { ...scope, operation: { kind: "status" } });
-    if (state.kind !== "status" || state.executionStopped !== true || ((startup || startupCleanup?.requiresPreparationStop) && state.preparationStopped !== true)) throw new Error("Plugin Runner termination is unconfirmed");
+    const confirmed = (state?: Awaited<ReturnType<typeof executeEnvironmentTask>>) => state?.kind === "status" && state.executionStopped === true &&
+      (!(startup || startupCleanup?.requiresPreparationStop) || state.preparationStopped === true);
+    let state = options.executionStopObserved === true
+      ? await executeEnvironmentTask(db, workers, { ...scope, operation: { kind: "status" } }) : undefined;
+    if (!confirmed(state)) {
+      await executeEnvironmentTask(db, workers, { ...scope, operation: { kind: "stop" } });
+      state = await executeEnvironmentTask(db, workers, { ...scope, operation: { kind: "status" } });
+    }
+    if (!confirmed(state)) throw new Error("Plugin Runner termination is unconfirmed");
     await draining;
     await executeEnvironmentTask(db, workers, { ...scope, operation: { kind: "complete" } });
-    return true;
+    return "completed";
   } catch {
     await writeEnvironmentCleanup(db, tx => tx.update(environmentLeases).set({ status: "pending_cleanup", cleanupStatus: "failed",
       failureReason: "plugin_runner_task_cleanup_unconfirmed", releasedAt: new Date(), updatedAt: new Date(),

@@ -3,7 +3,7 @@ import { PgDialect } from "drizzle-orm/pg-core";
 import { executionWorkspaces, environmentLeases, type Db } from "@paperclipai/db";
 import { environmentTaskErrorCodeData, environmentTaskOperationSchema, parseEnvironmentTaskResult, JsonRpcCallError, PluginEnvironmentTaskError,
   readEnvironmentTaskErrorCode, readEnvironmentTaskErrorDiagnostic } from "@paperclipai/plugin-sdk";
-import { executeEnvironmentTask, settleDispatchedEnvironmentTask } from "../services/environment-task-runtime.js";
+import { executeEnvironmentTask, isSettledReadyRunnerState, settleDispatchedEnvironmentTask } from "../services/environment-task-runtime.js";
 import { NativeExecutionContext } from "../services/native-runtime/native-execution-context.js";
 
 const state = vi.hoisted(() => ({ plugin: {} as any, release: vi.fn(), identity: vi.fn(), config: vi.fn() }));
@@ -44,6 +44,22 @@ beforeEach(() => {
   state.config.mockReset().mockResolvedValue({ configJson: { endpoint: "synthetic" } });
   state.plugin = { id: "original", pluginKey: "test.provider", status: "ready", manifestJson: { capabilities: ["environment.drivers.register"], environmentDrivers: [{ driverKey: "tasks", supportsTasks: true }] } };
 });
+describe("stopped Runner checkpoint settlement", () => {
+  const idle = () => ({ schema: "paperclip.runner.durable.state.v1", lifecycle: "ready", lastControllerCommandSeq: 7,
+    ackedSourceSeq: 11, nextSourceSeq: 12, outbox: [] as unknown[], processedCommands: { done: { status: "completed" } } as Record<string, unknown>,
+    pendingTerminalDelivery: null, pendingProviderCleanup: null, warmTransition: null } as Record<string, unknown>);
+  it("treats only a ready journal at a fully settled cut as suspended", () => {
+    expect(isSettledReadyRunnerState(idle())).toBe(true);
+    for (const change of [
+      { lifecycle: "suspended" }, { lifecycle: "recoverable_failure" }, { lifecycle: "backpressure" }, { schema: "unknown" },
+      { outbox: [{ sourceSeq: 12 }] }, { outbox: undefined }, { ackedSourceSeq: 10 }, { nextSourceSeq: 0 }, { nextSourceSeq: undefined },
+      { processedCommands: { turn: { status: "pending" } } }, { processedCommands: { turn: { status: "indeterminate" } } },
+      { processedCommands: { turn: {} } }, { processedCommands: undefined }, { processedCommands: [] },
+      { pendingTerminalDelivery: { commandId: "c" } }, { pendingProviderCleanup: { commandId: "c" } }, { warmTransition: { id: "t" } },
+    ]) expect(isSettledReadyRunnerState({ ...idle(), ...change }), JSON.stringify(change)).toBe(false);
+  });
+});
+
 describe("plugin-provided Runner execution", () => {
   it.each([false, true])("retires an undispatched warm task only with required preparation proof (%s)", async preparationStopped => {
     const value = row();
@@ -69,8 +85,26 @@ describe("plugin-provided Runner execution", () => {
     expect(operations).not.toContain("complete");
     release();
     const result = await checked;
-    if (preparationStopped) { expect(result).toEqual({ value: true, error: null }); expect(operations).toEqual(["stop", "status", "complete"]); }
+    if (preparationStopped) { expect(result).toEqual({ value: "completed", error: null }); expect(operations).toEqual(["stop", "status", "complete"]); }
     else { expect(result.error?.message).toContain("termination is unconfirmed"); expect(fixture.sets).toContainEqual(expect.objectContaining({ status: "pending_cleanup", cleanupStatus: "failed" })); }
+  });
+  it.each([true, false])("checks startup preparation proof after resume observed the stop (%s)", async preparationStopped => {
+    const value = row();
+    Object.assign(value.lease.metadata, { runnerTaskDispatched: false,
+      runnerTaskStartupCleanup: { contextId: "startup", requiresPreparationStop: true } });
+    const fixture = database(value), workers = worker();
+    fixture.db.select = ((...args: unknown[]) => (database(value).db.select as (...values: unknown[]) => unknown)(...args)) as Db["select"];
+    Object.assign(workers, { drainStartup: vi.fn(async () => undefined) });
+    const operations: string[] = [];
+    let stopped = false;
+    workers.call.mockImplementation(async (...args: any[]) => {
+      const operation = args[2].operation.kind; operations.push(operation);
+      if (operation === "stop") stopped = true;
+      return operation === "status" ? { kind: "status", taskId: "attempt-1", phase: "cancelled", executionStopped: true, preparationStopped: preparationStopped || stopped }
+        : { kind: "accepted", taskId: "attempt-1" };
+    });
+    await expect(settleDispatchedEnvironmentTask(fixture.db, workers as never, { companyId: "company", id: leaseId }, { executionStopObserved: true })).resolves.toBe("completed");
+    expect(operations).toEqual(preparationStopped ? ["status", "complete"] : ["status", "stop", "status", "complete"]);
   });
   it("negotiates the transient context without reading transport for an older plugin", async () => {
     const context = new NativeExecutionContext({ binding: { companyId: "company", agentId: "agent", runId: "run" } } as never, 1_000);

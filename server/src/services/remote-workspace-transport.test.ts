@@ -16,10 +16,12 @@ import {
   prepareRemoteRepository,
   prepareRemoteWorkspaceDirectory,
   remoteWorkspaceFailureCause,
+  removeRemoteRecoveryAttachment,
   restoreRemoteWorkspaceDirectory,
   type RemoteWorkspaceTarget,
 } from "./remote-workspace-transport.js";
 import { classifyNativeWorkspaceFailure } from "./native-runtime/native-workspace-failure.js";
+import { createRunPreparationTiming, drainRunPreparationPhases, measureRunPhase } from "./execution-preparation-timing.js";
 import { restoreRemoteWorkspaceArchive } from "./remote-workspace-snapshot-archive.js";
 import { readWorkspaceInventory, readonlyWorkspaceInventoryScript } from "./remote-workspace-readonly-inventory.js";
 
@@ -57,6 +59,73 @@ describe("remote workspace transport safety with real sandbox commands", () => {
     if (state === "missing" || state === "present") await expect(probe).resolves.toBe(state === "present");
     else await expect(probe).rejects.toThrow("remote_workspace_operation_failed");
     if (state !== "missing") expect(await fs.readFile(path.join(directory, "user.txt"), "utf8")).toBe("preserved user edit\n");
+  });
+
+  it.each(["missing", "present", "foreign", "directory_symlink"])(
+    "removes a retired recovery attachment only with its exact provenance: %s", async state => {
+    const operationId = randomUUID(), parent = path.join(workspace, ".paperclip-recovered");
+    const directory = path.join(parent, operationId), provenance = JSON.stringify({ operationId, sourceRunId: randomUUID() });
+    const sibling = path.join(parent, randomUUID());
+    if (state !== "missing") {
+      // A read-only directory, as a restored dependency cache can be, must still go.
+      await fs.mkdir(path.join(directory, "files", "locked"), { recursive: true });
+      await fs.writeFile(path.join(directory, "files", "locked", "cache.bin"), "cached\n");
+      await fs.chmod(path.join(directory, "files", "locked"), 0o555);
+      await fs.writeFile(path.join(directory, "provenance.json"), state === "foreign" ? "foreign proof" : provenance);
+      await fs.mkdir(sibling);
+    }
+    let outside = "";
+    if (state === "directory_symlink") {
+      outside = path.join(scratch, "outside-attachment");
+      await fs.rename(directory, outside); await fs.symlink(outside, directory);
+    }
+    const removal = removeRemoteRecoveryAttachment({ target: target().remote, remoteCwd: workspace, operationId, provenance });
+    if (state === "missing" || state === "present") await expect(removal).resolves.toBe(state === "present");
+    else await expect(removal).rejects.toThrow("remote_workspace_operation_failed");
+    if (state === "present") {
+      expect(await fs.lstat(directory).catch(() => null)).toBeNull();
+      expect((await fs.lstat(sibling)).isDirectory()).toBe(true);
+    }
+    if (state === "foreign") expect(await fs.readFile(path.join(directory, "files", "locked", "cache.bin"), "utf8")).toBe("cached\n");
+    if (state === "directory_symlink") expect(await fs.readFile(path.join(outside, "files", "locked", "cache.bin"), "utf8")).toBe("cached\n");
+    for (const kept of [directory, outside].filter(Boolean)) await fs.chmod(path.join(kept, "files", "locked"), 0o755).catch(() => undefined);
+  });
+
+  it("finishes a removal that was interrupted after its proof was deleted", async () => {
+    const operationId = randomUUID(), parent = path.join(workspace, ".paperclip-recovered");
+    const provenance = JSON.stringify({ operationId, sourceRunId: randomUUID() });
+    // An earlier removal renamed the verified attachment, then stopped after
+    // deleting its proof and part of its files.
+    const retiring = path.join(parent, `.retiring-${operationId}`);
+    await fs.mkdir(path.join(retiring, "files", "locked"), { recursive: true });
+    await fs.writeFile(path.join(retiring, "files", "locked", "left.txt"), "left behind\n");
+    await fs.chmod(path.join(retiring, "files", "locked"), 0o555);
+    const probe = { target: target().remote, remoteCwd: workspace, operationId, provenance };
+    await expect(hasRemoteRecoveryAttachment(probe)).resolves.toBe(false);
+    await expect(removeRemoteRecoveryAttachment(probe)).resolves.toBe(true);
+    expect(await fs.readdir(workspace)).toEqual([]);
+    await expect(removeRemoteRecoveryAttachment(probe)).resolves.toBe(false);
+  });
+
+  it("finishes an interrupted removal before removing a present attachment", async () => {
+    const operationId = randomUUID(), parent = path.join(workspace, ".paperclip-recovered");
+    const provenance = JSON.stringify({ operationId, sourceRunId: randomUUID() });
+    await fs.mkdir(path.join(parent, `.retiring-${operationId}`, "files"), { recursive: true });
+    await fs.mkdir(path.join(parent, operationId), { recursive: true });
+    await fs.writeFile(path.join(parent, operationId, "provenance.json"), provenance);
+    await expect(removeRemoteRecoveryAttachment({ target: target().remote, remoteCwd: workspace, operationId, provenance }))
+      .resolves.toBe(true);
+    expect(await fs.readdir(workspace)).toEqual([]);
+  });
+
+  it("removes the empty recovery folder with its last attachment", async () => {
+    const operationId = randomUUID(), parent = path.join(workspace, ".paperclip-recovered");
+    const provenance = JSON.stringify({ operationId, sourceRunId: randomUUID() });
+    await fs.mkdir(path.join(parent, operationId), { recursive: true });
+    await fs.writeFile(path.join(parent, operationId, "provenance.json"), provenance);
+    await expect(removeRemoteRecoveryAttachment({ target: target().remote, remoteCwd: workspace, operationId, provenance }))
+      .resolves.toBe(true);
+    expect(await fs.readdir(workspace)).toEqual([]);
   });
 
   async function git(cwd: string, ...args: string[]) {
@@ -170,6 +239,38 @@ describe("remote workspace transport safety with real sandbox commands", () => {
       const targetDir = path.join(scratch, "large-restored");
       await restoreRemoteWorkspaceArchive({ archivePath: captured.archivePath, targetDir, expectedManifestDigest: captured.manifestDigest });
       expect((await fs.readFile(path.join(targetDir, "large.bin"))).equals(content)).toBe(true);
+    } finally { await captured.cleanup(); }
+  });
+
+  it("times the restore's sandbox upload and extraction as separate run-log steps", async () => {
+    await fs.writeFile(path.join(workspace, "saved.txt"), "saved synthetic files\n");
+    const { remote, execute } = target();
+    const captured = await captureRemoteWorkspaceArchive({ target: remote, remoteCwd: workspace, operationId: randomUUID() });
+    try {
+      const pause = () => new Promise(resolve => setTimeout(resolve, 60));
+      const syncIn = remote.runner!.syncIn!;
+      remote.runner!.syncIn = async (...args) => { await pause(); return syncIn(...args); };
+      const original = execute.getMockImplementation()!;
+      execute.mockImplementation(async input => {
+        if (input.args?.[0] === "-e" && input.args[1]?.includes("workspace-restored.json")) await pause();
+        return original(input);
+      });
+      // Production wraps the restore in sandbox_restore; with an OTLP endpoint
+      // that traced step owns the scope, and the run log must still get both.
+      vi.stubEnv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://127.0.0.1:9");
+      const runId = randomUUID();
+      await createRunPreparationTiming(runId)("workspace", () => measureRunPhase("workspace.snapshot.sandbox_restore",
+        () => restoreRemoteWorkspaceDirectory({ target: remote,
+          remoteCwd: path.join(scratch, "restored"), archivePath: captured.archivePath,
+          manifestDigest: captured.manifestDigest, restorationIdentity: "c".repeat(64) })));
+      vi.unstubAllEnvs();
+      expect(drainRunPreparationPhases(runId).map(phase => [phase.name, phase.outcome])).toEqual([
+        ["workspace.snapshot.sandbox_upload", "ok"],
+        ["workspace.snapshot.sandbox_extract", "ok"],
+        ["workspace.snapshot.sandbox_restore", "ok"],
+        ["heartbeat.prepare.workspace", "ok"],
+      ]);
+      expect(await fs.readFile(path.join(scratch, "restored", "saved.txt"), "utf8")).toBe("saved synthetic files\n");
     } finally { await captured.cleanup(); }
   });
 
@@ -756,20 +857,49 @@ fs.unlinkSync(${JSON.stringify(kill)});process.kill(process.pid,'SIGKILL');}retu
     expect(await fs.readdir(outside)).toEqual(["workspace.pcws"]);
   });
 
-  it.each(["split", "one-shot"] as const)("retains a closed capture validation failure with %s output", async outputMode => {
-    const privateName = "SYNTHETIC_PRIVATE_FILENAME", outside = path.join(scratch, privateName);
-    await fs.writeFile(outside, "outside source bytes\n");
+  it.skipIf(process.platform === "win32").each(["split", "one-shot"] as const)("retains a closed capture validation failure with %s output", async outputMode => {
+    const privateName = "SYNTHETIC_PRIVATE_FILENAME";
     await fs.writeFile(path.join(workspace, "saved.txt"), "retained source bytes\n");
-    await fs.symlink(`../${privateName}`, path.join(workspace, "link"));
+    await exec("mkfifo", [path.join(workspace, privateName)]);
     const { remote, execute } = target({}, outputMode), operationId = randomUUID();
     await expect(captureRemoteWorkspaceArchive({ target: remote, remoteCwd: workspace, operationId }))
-      .rejects.toThrow(/^remote_workspace_archive_unsafe_symlink$/);
+      .rejects.toThrow(/^remote_workspace_archive_unsupported_entry$/);
     expect(execute).toHaveBeenCalledTimes(2);
-    expect(await fs.readFile(outside, "utf8")).toBe("outside source bytes\n");
     expect(await fs.readFile(path.join(workspace, "saved.txt"), "utf8")).toBe("retained source bytes\n");
-    expect(await fs.readlink(path.join(workspace, "link"))).toBe(`../${privateName}`);
+    expect((await fs.lstat(path.join(workspace, privateName))).isFIFO()).toBe(true);
     const directory = path.join(workspace, ".paperclip-runtime", "workspace-snapshots", operationId);
     expect(await fs.readdir(directory)).toEqual(["archive.cjs"]);
+  });
+
+  /**
+   * The staging shape through the sandbox command path: a `node_modules/.bin` link
+   * inside the workspace, a Chromium profile link by absolute path into /tmp,
+   * and a `..` link out of the workspace. The save completes; only the
+   * confined link is restored.
+   */
+  it.each(["split", "one-shot"] as const)("saves a workspace with outside links through the sandbox helper with %s output", async outputMode => {
+    const outside = path.join(scratch, "sandbox-tmp"); await fs.mkdir(outside);
+    await fs.writeFile(path.join(outside, "SingletonSocket"), "SYNTHETIC_SANDBOX_ONLY\n");
+    await fs.writeFile(path.join(workspace, "saved.txt"), "review evidence\n");
+    await fs.mkdir(path.join(workspace, "node_modules", "tool"), { recursive: true });
+    await fs.mkdir(path.join(workspace, "node_modules", ".bin"));
+    await fs.writeFile(path.join(workspace, "node_modules", "tool", "cli.js"), "cli\n");
+    await fs.symlink("../tool/cli.js", path.join(workspace, "node_modules", ".bin", "tool"));
+    await fs.mkdir(path.join(workspace, ".review-chrome"));
+    await fs.symlink(path.join(outside, "SingletonSocket"), path.join(workspace, ".review-chrome", "SingletonSocket"));
+    await fs.symlink("../sandbox-tmp/SingletonSocket", path.join(workspace, "escape"));
+    const { remote } = target({}, outputMode);
+    const captured = await captureRemoteWorkspaceArchive({ target: remote, remoteCwd: workspace, operationId: randomUUID() });
+    try {
+      const restoredRoot = path.join(scratch, "restored");
+      await restoreRemoteWorkspaceDirectory({ target: remote, remoteCwd: restoredRoot, archivePath: captured.archivePath,
+        manifestDigest: captured.manifestDigest, restorationIdentity: "d".repeat(64) });
+      expect(await fs.readFile(path.join(restoredRoot, "saved.txt"), "utf8")).toBe("review evidence\n");
+      expect(await fs.readlink(path.join(restoredRoot, "node_modules", ".bin", "tool"))).toBe("../tool/cli.js");
+      expect(await fs.readdir(path.join(restoredRoot, ".review-chrome"))).toEqual([]);
+      await expect(fs.lstat(path.join(restoredRoot, "escape"))).rejects.toMatchObject({ code: "ENOENT" });
+      expect((await fs.readFile(captured.archivePath)).includes(Buffer.from("SYNTHETIC_SANDBOX_ONLY"))).toBe(false);
+    } finally { await captured.cleanup(); }
   });
 
   it.each(["split", "one-shot"] as const)("retains a closed filesystem failure for a missing canonical archive with %s output", async outputMode => {
