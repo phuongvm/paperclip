@@ -5,6 +5,13 @@ import { execute, mapFinalResultForTest, parseSseFramesForTest, resolveSessionKe
 import { testEnvironment } from "./test.js";
 import { parseHermesGatewayStdoutLine } from "../ui/parse-stdout.js";
 
+function vanillaCatalogResponse(): Response {
+  return new Response(JSON.stringify({ providers: [] }), {
+    status: 200,
+    headers: { "content-type": "application/json" },
+  });
+}
+
 function makeCtx(config: Record<string, unknown>): AdapterExecutionContext {
   return {
     runId: "pc-run-1",
@@ -89,6 +96,9 @@ describe("execute", () => {
       "x".repeat(9_000)];
     vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
+      if (url.includes("/api/model/options")) {
+        return vanillaCatalogResponse();
+      }
       if (url.endsWith("/v1/runs")) {
         return new Response(JSON.stringify({ run_id: "run-hermes-1", status: "started" }), { status: 200 });
       }
@@ -139,6 +149,9 @@ describe("execute", () => {
     ctx.onDispatch = onDispatch;
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
+      if (url.includes("/api/model/options")) {
+        return vanillaCatalogResponse();
+      }
       if (url.endsWith("/v1/runs")) {
         expect(onDispatch).toHaveBeenCalledTimes(1);
         return new Response(JSON.stringify({ run_id: "run-hermes-1", status: "started" }), { status: 200 });
@@ -162,6 +175,9 @@ describe("execute", () => {
   it("constructs POST /v1/runs with auth, idempotency, and Hermes session headers", async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
+      if (url.includes("/api/model/options")) {
+        return vanillaCatalogResponse();
+      }
       if (url.endsWith("/v1/runs")) {
         return new Response(JSON.stringify({ run_id: "run-hermes-1", status: "started" }), { status: 200 });
       }
@@ -257,6 +273,9 @@ describe("execute", () => {
     const compactTaskMarkdown = ["Paperclip task context:", '- Issue: "PAP-1"'].join("\n");
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
+      if (url.includes("/api/model/options")) {
+        return vanillaCatalogResponse();
+      }
       if (url.endsWith("/v1/runs")) {
         return new Response(JSON.stringify({ run_id: "run-hermes-1", status: "started" }), { status: 200 });
       }
@@ -314,6 +333,9 @@ describe("execute", () => {
   it.each([false, true])("delivers the shared assignment and ordered comments at the HTTP boundary (resumed=%s)", async (resumed) => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
+      if (url.includes("/api/model/options")) {
+        return vanillaCatalogResponse();
+      }
       if (url.endsWith("/v1/runs")) {
         return new Response(JSON.stringify({ run_id: "run-hermes-1", status: "completed", output: "done" }), { status: 200 });
       }
@@ -365,6 +387,9 @@ describe("execute", () => {
   it("routes a bare Hermes dashboard URL on port 9119 through the API prefix", async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
+      if (url.includes("/api/model/options")) {
+        return vanillaCatalogResponse();
+      }
       if (url === "http://127.0.0.1:9119/api/v1/runs") {
         return new Response(JSON.stringify({ run_id: "run-hermes-1", status: "started" }), { status: 200 });
       }
@@ -411,6 +436,9 @@ describe("execute", () => {
     const commentBody = "Keep this current comment exactly once.";
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
+      if (url.includes("/api/model/options")) {
+        return vanillaCatalogResponse();
+      }
       if (url.endsWith("/v1/runs")) {
         return new Response(JSON.stringify({ run_id: "run-hermes-1", status: "started" }), { status: 200 });
       }
@@ -449,6 +477,9 @@ describe("execute", () => {
   it("routes the default Hermes dashboard chat URL on port 9119 through the API prefix", async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
+      if (url.includes("/api/model/options")) {
+        return vanillaCatalogResponse();
+      }
       if (url === "http://127.0.0.1:9119/api/v1/runs") {
         return new Response(JSON.stringify({ run_id: "run-hermes-chat", status: "started" }), { status: 200 });
       }
@@ -497,6 +528,9 @@ describe("execute", () => {
     });
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
+      if (url.includes("/api/model/options")) {
+        return vanillaCatalogResponse();
+      }
       if (url.endsWith("/v1/runs")) {
         return new Response(JSON.stringify({ run_id: "run-hermes-1", status: "started" }), { status: 200 });
       }
@@ -545,6 +579,9 @@ describe("execute", () => {
     const agentSessionKey = "paperclip:company:company-1:agent:agent-1";
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
+      if (url.includes("/api/model/options")) {
+        return vanillaCatalogResponse();
+      }
       if (url.endsWith("/v1/runs")) {
         return new Response(JSON.stringify({ run_id: "run-hermes-1", status: "started" }), { status: 200 });
       }
@@ -586,6 +623,9 @@ describe("execute", () => {
   it("falls back to polling when SSE is unavailable", async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
+      if (url.includes("/api/model/options")) {
+        return vanillaCatalogResponse();
+      }
       if (url.endsWith("/v1/runs")) {
         return new Response(JSON.stringify({ run_id: "run-hermes-1", status: "started" }), { status: 200 });
       }
@@ -746,6 +786,9 @@ describe("execute", () => {
   it("calls stop on timeout", async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
+      if (url.includes("/api/model/options")) {
+        return vanillaCatalogResponse();
+      }
       if (url.endsWith("/v1/runs")) {
         return new Response(JSON.stringify({ run_id: "run-slow", status: "started" }), { status: 200 });
       }
@@ -1014,7 +1057,11 @@ describe("testEnvironment", () => {
   });
 
   it("allows remote plain HTTP only with the unsafe dev escape hatch", async () => {
-    const fetchMock = vi.fn(async () => new Response("{}", { status: 200 }));
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) =>
+      String(input).includes("/api/model/options")
+        ? vanillaCatalogResponse()
+        : new Response("{}", { status: 200 }),
+    );
     vi.stubGlobal("fetch", fetchMock);
 
     const result = await testEnvironment({
@@ -1095,7 +1142,11 @@ describe("testEnvironment", () => {
   });
 
   it("tests a bare Hermes dashboard URL on port 9119 through the API prefix", async () => {
-    const fetchMock = vi.fn(async () => new Response("{}", { status: 200 }));
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) =>
+      String(input).includes("/api/model/options")
+        ? vanillaCatalogResponse()
+        : new Response("{}", { status: 200 }),
+    );
     vi.stubGlobal("fetch", fetchMock);
 
     const result = await testEnvironment({
@@ -1125,7 +1176,11 @@ describe("testEnvironment", () => {
   });
 
   it("tests a Hermes dashboard chat URL on port 9119 through the API prefix", async () => {
-    const fetchMock = vi.fn(async () => new Response("{}", { status: 200 }));
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) =>
+      String(input).includes("/api/model/options")
+        ? vanillaCatalogResponse()
+        : new Response("{}", { status: 200 }),
+    );
     vi.stubGlobal("fetch", fetchMock);
 
     const result = await testEnvironment({
@@ -1472,5 +1527,60 @@ describe("S3 gateway URL normal form, profile validation, and buildRunSelection 
     expect(res.exitCode).toBe(1);
     expect(res.errorCode).toBe("hermes_effective_provider_unverified");
     expect(postRequests).toHaveLength(0);
+  });
+
+  it("fails closed with hermes_gateway_catalog_invalid and zero POSTs when gateway catalog is malformed or has duplicate slugs (SP-03 remediation)", async () => {
+    const modelOptionsMod = await import("./model-options.js");
+
+    for (const badPayload of [{}, { providers: [{ slug: "router-a", models: ["m"] }, { slug: "router-a", models: ["m"] }] }]) {
+      modelOptionsMod.resetGatewayCatalogCacheForTests?.();
+      delete process.env.PAPERCLIP_HERMES_ALLOWED_PROVIDERS;
+
+      const postRequests: string[] = [];
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+          const url = String(input);
+          if (url.includes("/health")) {
+            return new Response(JSON.stringify({ status: "ok" }), {
+              status: 200,
+              headers: { "content-type": "application/json" },
+            });
+          }
+          if (url.includes("/api/model/options")) {
+            return new Response(JSON.stringify(badPayload), {
+              status: 200,
+              headers: { "content-type": "application/json" },
+            });
+          }
+          if ((init?.method ?? "GET") === "POST") {
+            postRequests.push(url);
+          }
+          return new Response("Service Unavailable", { status: 503 });
+        }),
+      );
+
+      const res = await execute(
+        makeCtx({
+          apiBaseUrl: "http://127.0.0.1:8642",
+          apiKey: "secret-key",
+        }),
+      );
+
+      expect(res.exitCode).toBe(1);
+      expect(res.errorCode).toBe("hermes_gateway_catalog_invalid");
+      expect(postRequests).toHaveLength(0);
+
+      const testRes = await testEnvironment({
+        companyId: "comp-1",
+        adapterType: "hermes_gateway",
+        config: {
+          apiBaseUrl: "http://127.0.0.1:8642",
+          apiKey: "secret-key",
+        },
+      });
+      expect(testRes.status).toBe("fail");
+      expect(testRes.checks.some((c) => c.code === "hermes_gateway_catalog_invalid")).toBe(true);
+    }
   });
 });

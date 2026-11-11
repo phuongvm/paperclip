@@ -994,6 +994,25 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   }
 
   if (catalogRes.failure && !catalogRes.parsed) {
+    if (
+      catalogRes.failure.reason === "invalid_payload" ||
+      catalogRes.failure.reason === "duplicate_slug"
+    ) {
+      await ctx.onLog?.(
+        "stderr",
+        `[hermes-gateway] catalog discovery failed: reason=${catalogRes.failure.reason}\n`,
+      );
+      return {
+        exitCode: 1,
+        signal: null,
+        timedOut: false,
+        errorCode: "hermes_gateway_catalog_invalid",
+        errorMessage: `Hermes gateway /api/model/options returned an invalid catalog (${catalogRes.failure.reason}).`,
+        resultJson: {
+          connectionFailure: gatewayConfigurationFailure("endpoint_invalid"),
+        },
+      };
+    }
     if (catalogRes.failure.reason === "network_error") {
       const fetchErr = new Error(
         `Hermes gateway request failed: ${fetchFailureMessage(catalogRes.failure.error)}`,

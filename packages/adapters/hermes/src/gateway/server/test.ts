@@ -184,13 +184,38 @@ export async function testEnvironment(
       allowInsecureRemoteHttp: allowsInsecureRemoteHttp(ctx.config),
     });
 
-    if (catalogRes.failure?.reason === "unauthorized") {
-      checks.push({
-        code: "hermes_gateway_catalog_unauthorized",
-        level: "error",
-        message: "Hermes Gateway /api/model/options rejected the configured apiKey (HTTP 401/403).",
-        hint: "Verify adapterConfig.apiKey matches the gateway's API_SERVER_KEY.",
-      });
+    if (catalogRes.failure && !catalogRes.parsed) {
+      if (catalogRes.failure.reason === "unauthorized") {
+        checks.push({
+          code: "hermes_gateway_catalog_unauthorized",
+          level: "error",
+          message: "Hermes Gateway /api/model/options rejected the configured apiKey (HTTP 401/403).",
+          hint: "Verify adapterConfig.apiKey matches the gateway's API_SERVER_KEY.",
+        });
+      } else if (
+        catalogRes.failure.reason === "invalid_payload" ||
+        catalogRes.failure.reason === "duplicate_slug"
+      ) {
+        checks.push({
+          code: "hermes_gateway_catalog_invalid",
+          level: "error",
+          message: `Hermes Gateway /api/model/options returned an invalid catalog (${catalogRes.failure.reason}).`,
+          hint: "Verify the Hermes gateway configuration and model options endpoint.",
+        });
+      } else if (catalogRes.failure.reason === "network_error") {
+        checks.push({
+          code: "hermes_gateway_catalog_unreachable",
+          level: "error",
+          message: "Hermes Gateway /api/model/options could not be reached.",
+          hint: "Check apiBaseUrl and ensure Hermes Gateway is running.",
+        });
+      } else if (catalogRes.failure.reason === "http_error") {
+        checks.push({
+          code: `hermes_gateway_catalog_http_${catalogRes.failure.status ?? "error"}`,
+          level: "error",
+          message: `Hermes Gateway /api/model/options returned HTTP ${catalogRes.failure.status}.`,
+        });
+      }
     } else {
       const sel = buildRunSelection(ctx.config, catalogRes.parsed?.catalog ?? null);
       if (!sel.ok) {
