@@ -184,6 +184,7 @@ export async function testEnvironment(
       allowInsecureRemoteHttp: allowsInsecureRemoteHttp(ctx.config),
     });
 
+    const sel = buildRunSelection(ctx.config, catalogRes.parsed?.catalog ?? null);
     if (catalogRes.failure && !catalogRes.parsed) {
       if (catalogRes.failure.reason === "unauthorized") {
         checks.push({
@@ -202,6 +203,12 @@ export async function testEnvironment(
           message: `Hermes Gateway /api/model/options returned an invalid catalog (${catalogRes.failure.reason}).`,
           hint: "Verify the Hermes gateway configuration and model options endpoint.",
         });
+      } else if (!sel.ok) {
+        checks.push({
+          code: sel.errorCode,
+          level: "error",
+          message: `Hermes gateway provider validation failed (${sel.errorCode}${sel.provider ? `: ${sel.provider}` : ""}).`,
+        });
       } else if (catalogRes.failure.reason === "network_error") {
         checks.push({
           code: "hermes_gateway_catalog_unreachable",
@@ -216,22 +223,19 @@ export async function testEnvironment(
           message: `Hermes Gateway /api/model/options returned HTTP ${catalogRes.failure.status}.`,
         });
       }
+    } else if (!sel.ok) {
+      checks.push({
+        code: sel.errorCode,
+        level: "error",
+        message: `Hermes gateway provider validation failed (${sel.errorCode}${sel.provider ? `: ${sel.provider}` : ""}).`,
+      });
     } else {
-      const sel = buildRunSelection(ctx.config, catalogRes.parsed?.catalog ?? null);
-      if (!sel.ok) {
+      for (const w of sel.warnings) {
         checks.push({
-          code: sel.errorCode,
-          level: "error",
-          message: `Hermes gateway provider validation failed (${sel.errorCode}${sel.provider ? `: ${sel.provider}` : ""}).`,
+          code: w,
+          level: "warn",
+          message: `Hermes gateway model warning: ${w}`,
         });
-      } else {
-        for (const w of sel.warnings) {
-          checks.push({
-            code: w,
-            level: "warn",
-            message: `Hermes gateway model warning: ${w}`,
-          });
-        }
       }
     }
   }

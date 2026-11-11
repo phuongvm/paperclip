@@ -1509,6 +1509,12 @@ describe("S3 gateway URL normal form, profile validation, and buildRunSelection 
       "fetch",
       vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
         const url = String(input);
+        if (url.includes("/health")) {
+          return new Response(JSON.stringify({ status: "ok" }), {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          });
+        }
         if ((init?.method ?? "GET") === "POST") {
           postRequests.push(url);
         }
@@ -1527,6 +1533,17 @@ describe("S3 gateway URL normal form, profile validation, and buildRunSelection 
     expect(res.exitCode).toBe(1);
     expect(res.errorCode).toBe("hermes_effective_provider_unverified");
     expect(postRequests).toHaveLength(0);
+
+    const envRes = await testEnvironment({
+      companyId: "comp-1",
+      adapterType: "hermes_gateway",
+      config: {
+        apiBaseUrl: "http://127.0.0.1:8642",
+        apiKey: "secret-key",
+      },
+    });
+    expect(envRes.status).toBe("fail");
+    expect(envRes.checks.some((c) => c.code === "hermes_effective_provider_unverified")).toBe(true);
   });
 
   it("fails closed with hermes_gateway_catalog_invalid and zero POSTs when gateway catalog is malformed or has duplicate slugs (SP-03 remediation)", async () => {
