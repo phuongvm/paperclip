@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { assertValidAdapterLoginCapability } from "@paperclipai/adapter-utils";
-import { listServerAdapters, requireServerAdapter } from "./registry.js";
+import { listAdapterModels, listServerAdapters, refreshAdapterModels, requireServerAdapter } from "./registry.js";
 import * as executionTarget from "@paperclipai/adapter-utils/execution-target";
 import { BUILTIN_ADAPTER_TYPES } from "./builtin-adapter-types.js";
 import { QUALIFIED_ACPX_PROFILES, KIMI_DISTRIBUTION_CLOSURE_SHA256 } from "../vendor/paperclip-runner/index.js";
@@ -398,5 +398,49 @@ describe("plugin Runner-task environment checks", () => {
       checks: [{ code: "ai_connection_required", level: "error", message: expect.stringContaining("requires a managed AI connection") }] });
     expect(runnerTask).not.toHaveBeenCalled();
     expect(() => assertHarnessTestPassed(result)).toThrow(expect.objectContaining({ code: "ai_connection_required" }));
+  });
+});
+
+describe("PAPERCLIP_ADAPTER_MODELS declared override precedence", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllEnvs();
+  });
+
+  it("retains declared PAPERCLIP_ADAPTER_MODELS precedence over dynamic hermes_local listModels and refreshModels", async () => {
+    const adapter = requireServerAdapter("hermes_local");
+    const origListModels = adapter.listModels;
+    const origRefreshModels = adapter.refreshModels;
+    const dynamicList = vi.fn(async () => [
+      { id: "ai-router/cb-gemini-flash-high", label: "cb-gemini-flash-high" },
+    ]);
+    const dynamicRefresh = vi.fn(async () => [
+      { id: "headroom-proxy/cb-opus-4.6-thinking", label: "cb-opus-4.6-thinking" },
+    ]);
+    adapter.listModels = dynamicList;
+    adapter.refreshModels = dynamicRefresh;
+
+    try {
+      vi.stubEnv(
+        "PAPERCLIP_ADAPTER_MODELS",
+        JSON.stringify({
+          hermes_local: [
+            { id: "declared-stopgap/model-a", label: "Declared Model A" },
+          ],
+        }),
+      );
+
+      await expect(listAdapterModels("hermes_local")).resolves.toEqual([
+        { id: "declared-stopgap/model-a", label: "Declared Model A" },
+      ]);
+      await expect(refreshAdapterModels("hermes_local")).resolves.toEqual([
+        { id: "declared-stopgap/model-a", label: "Declared Model A" },
+      ]);
+      expect(dynamicList).not.toHaveBeenCalled();
+      expect(dynamicRefresh).not.toHaveBeenCalled();
+    } finally {
+      adapter.listModels = origListModels;
+      adapter.refreshModels = origRefreshModels;
+    }
   });
 });

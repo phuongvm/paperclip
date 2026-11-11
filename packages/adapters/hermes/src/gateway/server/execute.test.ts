@@ -5,6 +5,13 @@ import { execute, mapFinalResultForTest, parseSseFramesForTest, resolveSessionKe
 import { testEnvironment } from "./test.js";
 import { parseHermesGatewayStdoutLine } from "../ui/parse-stdout.js";
 
+function vanillaCatalogResponse(): Response {
+  return new Response(JSON.stringify({ providers: [] }), {
+    status: 200,
+    headers: { "content-type": "application/json" },
+  });
+}
+
 function makeCtx(config: Record<string, unknown>): AdapterExecutionContext {
   return {
     runId: "pc-run-1",
@@ -89,6 +96,9 @@ describe("execute", () => {
       "x".repeat(9_000)];
     vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
+      if (url.includes("/api/model/options")) {
+        return vanillaCatalogResponse();
+      }
       if (url.endsWith("/v1/runs")) {
         return new Response(JSON.stringify({ run_id: "run-hermes-1", status: "started" }), { status: 200 });
       }
@@ -139,6 +149,9 @@ describe("execute", () => {
     ctx.onDispatch = onDispatch;
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
+      if (url.includes("/api/model/options")) {
+        return vanillaCatalogResponse();
+      }
       if (url.endsWith("/v1/runs")) {
         expect(onDispatch).toHaveBeenCalledTimes(1);
         return new Response(JSON.stringify({ run_id: "run-hermes-1", status: "started" }), { status: 200 });
@@ -162,6 +175,9 @@ describe("execute", () => {
   it("constructs POST /v1/runs with auth, idempotency, and Hermes session headers", async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
+      if (url.includes("/api/model/options")) {
+        return vanillaCatalogResponse();
+      }
       if (url.endsWith("/v1/runs")) {
         return new Response(JSON.stringify({ run_id: "run-hermes-1", status: "started" }), { status: 200 });
       }
@@ -257,6 +273,9 @@ describe("execute", () => {
     const compactTaskMarkdown = ["Paperclip task context:", '- Issue: "PAP-1"'].join("\n");
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
+      if (url.includes("/api/model/options")) {
+        return vanillaCatalogResponse();
+      }
       if (url.endsWith("/v1/runs")) {
         return new Response(JSON.stringify({ run_id: "run-hermes-1", status: "started" }), { status: 200 });
       }
@@ -314,6 +333,9 @@ describe("execute", () => {
   it.each([false, true])("delivers the shared assignment and ordered comments at the HTTP boundary (resumed=%s)", async (resumed) => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
+      if (url.includes("/api/model/options")) {
+        return vanillaCatalogResponse();
+      }
       if (url.endsWith("/v1/runs")) {
         return new Response(JSON.stringify({ run_id: "run-hermes-1", status: "completed", output: "done" }), { status: 200 });
       }
@@ -365,6 +387,9 @@ describe("execute", () => {
   it("routes a bare Hermes dashboard URL on port 9119 through the API prefix", async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
+      if (url.includes("/api/model/options")) {
+        return vanillaCatalogResponse();
+      }
       if (url === "http://127.0.0.1:9119/api/v1/runs") {
         return new Response(JSON.stringify({ run_id: "run-hermes-1", status: "started" }), { status: 200 });
       }
@@ -411,6 +436,9 @@ describe("execute", () => {
     const commentBody = "Keep this current comment exactly once.";
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
+      if (url.includes("/api/model/options")) {
+        return vanillaCatalogResponse();
+      }
       if (url.endsWith("/v1/runs")) {
         return new Response(JSON.stringify({ run_id: "run-hermes-1", status: "started" }), { status: 200 });
       }
@@ -449,6 +477,9 @@ describe("execute", () => {
   it("routes the default Hermes dashboard chat URL on port 9119 through the API prefix", async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
+      if (url.includes("/api/model/options")) {
+        return vanillaCatalogResponse();
+      }
       if (url === "http://127.0.0.1:9119/api/v1/runs") {
         return new Response(JSON.stringify({ run_id: "run-hermes-chat", status: "started" }), { status: 200 });
       }
@@ -497,6 +528,9 @@ describe("execute", () => {
     });
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
+      if (url.includes("/api/model/options")) {
+        return vanillaCatalogResponse();
+      }
       if (url.endsWith("/v1/runs")) {
         return new Response(JSON.stringify({ run_id: "run-hermes-1", status: "started" }), { status: 200 });
       }
@@ -545,6 +579,9 @@ describe("execute", () => {
     const agentSessionKey = "paperclip:company:company-1:agent:agent-1";
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
+      if (url.includes("/api/model/options")) {
+        return vanillaCatalogResponse();
+      }
       if (url.endsWith("/v1/runs")) {
         return new Response(JSON.stringify({ run_id: "run-hermes-1", status: "started" }), { status: 200 });
       }
@@ -586,6 +623,9 @@ describe("execute", () => {
   it("falls back to polling when SSE is unavailable", async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
+      if (url.includes("/api/model/options")) {
+        return vanillaCatalogResponse();
+      }
       if (url.endsWith("/v1/runs")) {
         return new Response(JSON.stringify({ run_id: "run-hermes-1", status: "started" }), { status: 200 });
       }
@@ -746,6 +786,9 @@ describe("execute", () => {
   it("calls stop on timeout", async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
+      if (url.includes("/api/model/options")) {
+        return vanillaCatalogResponse();
+      }
       if (url.endsWith("/v1/runs")) {
         return new Response(JSON.stringify({ run_id: "run-slow", status: "started" }), { status: 200 });
       }
@@ -851,7 +894,15 @@ describe("gateway connection failure reporting", () => {
   it("classifies a network failure reading the create response without rewriting its error", async () => {
     const response = new Response("unread");
     vi.spyOn(response, "text").mockRejectedValue(new TypeError("terminated", { cause: { code: "UND_ERR_SOCKET" } }));
-    vi.stubGlobal("fetch", vi.fn(async () => response));
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+      if (String(input).includes("/api/model/options")) {
+        return new Response(JSON.stringify({ providers: [] }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      return response;
+    }));
     const result = await execute(makeCtx(config));
     expect(result).toMatchObject({ exitCode: 1, signal: null, timedOut: false,
       errorCode: "hermes_gateway_protocol_error", errorFamily: null, errorMessage: "terminated",
@@ -901,7 +952,15 @@ describe("gateway connection failure reporting", () => {
 
   it.each(["not json", JSON.stringify({ status: "running", connectionFailure: marker("create_run", "connection_refused") })])(
     "keeps malformed successful create responses reportable", async (body) => {
-      vi.stubGlobal("fetch", vi.fn(async () => new Response(body)));
+      vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+        if (String(input).includes("/api/model/options")) {
+          return new Response(JSON.stringify({ providers: [] }), {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          });
+        }
+        return new Response(body);
+      }));
       const result = await execute(makeCtx(config));
       expect(result.errorCode).toBe("hermes_gateway_protocol_error");
       expect(result.resultJson).toBeUndefined();
@@ -911,7 +970,15 @@ describe("gateway connection failure reporting", () => {
   it("does not classify a local response reader TypeError", async () => {
     const response = new Response("unread");
     vi.spyOn(response, "text").mockRejectedValue(new TypeError("cannot read property of undefined"));
-    vi.stubGlobal("fetch", vi.fn(async () => response));
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+      if (String(input).includes("/api/model/options")) {
+        return new Response(JSON.stringify({ providers: [] }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      return response;
+    }));
     const result = await execute(makeCtx(config));
     expect(result.errorCode).toBe("hermes_gateway_protocol_error");
     expect(result.resultJson).toBeUndefined();
@@ -943,6 +1010,12 @@ describe("gateway connection failure reporting", () => {
 
   it("retains an ambiguous accepted-run timeout after stream, poll, and stop connection failures", async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      if (String(input).includes("/api/model/options")) {
+        return new Response(JSON.stringify({ providers: [] }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
       if (String(input).endsWith("/v1/runs")) return new Response(JSON.stringify({ run_id: "run-accepted" }));
       throw new TypeError("fetch failed", { cause: { code: "ECONNRESET" } });
     });
@@ -984,7 +1057,11 @@ describe("testEnvironment", () => {
   });
 
   it("allows remote plain HTTP only with the unsafe dev escape hatch", async () => {
-    const fetchMock = vi.fn(async () => new Response("{}", { status: 200 }));
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) =>
+      String(input).includes("/api/model/options")
+        ? vanillaCatalogResponse()
+        : new Response("{}", { status: 200 }),
+    );
     vi.stubGlobal("fetch", fetchMock);
 
     const result = await testEnvironment({
@@ -1065,7 +1142,11 @@ describe("testEnvironment", () => {
   });
 
   it("tests a bare Hermes dashboard URL on port 9119 through the API prefix", async () => {
-    const fetchMock = vi.fn(async () => new Response("{}", { status: 200 }));
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) =>
+      String(input).includes("/api/model/options")
+        ? vanillaCatalogResponse()
+        : new Response("{}", { status: 200 }),
+    );
     vi.stubGlobal("fetch", fetchMock);
 
     const result = await testEnvironment({
@@ -1095,7 +1176,11 @@ describe("testEnvironment", () => {
   });
 
   it("tests a Hermes dashboard chat URL on port 9119 through the API prefix", async () => {
-    const fetchMock = vi.fn(async () => new Response("{}", { status: 200 }));
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) =>
+      String(input).includes("/api/model/options")
+        ? vanillaCatalogResponse()
+        : new Response("{}", { status: 200 }),
+    );
     vi.stubGlobal("fetch", fetchMock);
 
     const result = await testEnvironment({
@@ -1139,5 +1224,380 @@ describe("mapFinalResultForTest", () => {
     expect(result.exitCode).toBe(1);
     expect(result.errorCode).toBe("hermes_gateway_run_failed");
     expect(result.errorMessage).toBe("boom");
+  });
+});
+
+describe("S3 gateway URL normal form, profile validation, and buildRunSelection (Task 3.1)", () => {
+  const originalEnv = { ...process.env };
+
+  afterEach(() => {
+    process.env = { ...originalEnv };
+    vi.restoreAllMocks();
+  });
+
+  it.each([
+    [1, "http://127.0.0.1:8642", "coder", "http://127.0.0.1:8642/p/coder/v1/runs"],
+    [2, "http://127.0.0.1:9119", undefined, "http://127.0.0.1:9119/api/v1/runs"],
+    [3, "http://127.0.0.1:9119/chat", "coder", "http://127.0.0.1:9119/api/p/coder/v1/runs"],
+    [4, "http://127.0.0.1:9119/api", "coder", "http://127.0.0.1:9119/api/p/coder/v1/runs"],
+    [5, "http://127.0.0.1:8642/p/coder", "coder", "http://127.0.0.1:8642/p/coder/v1/runs"],
+  ])(
+    "6-row URL table row %i: apiBaseUrl=%s profile=%s -> %s",
+    async (_row, apiBaseUrl, profile, expectedUrl) => {
+      const targetMod = await import("./target.js");
+      const res = targetMod.resolveGatewayTarget({
+        apiBaseUrl,
+        ...(profile !== undefined ? { profile } : {}),
+      });
+      expect(res.ok).toBe(true);
+      if (res.ok) {
+        expect(res.url("/v1/runs")).toBe(expectedUrl);
+      }
+    },
+  );
+
+  it("6-row URL table row 6: /p/coder with profile=reviewer fails closed with hermes_gateway_profile_conflict and sends no request", async () => {
+    const targetMod = await import("./target.js");
+    const target = targetMod.resolveGatewayTarget({
+      apiBaseUrl: "http://127.0.0.1:8642/p/coder",
+      profile: "reviewer",
+    });
+    expect(target.ok).toBe(false);
+    if (!target.ok) {
+      expect(target.errorCode).toBe("hermes_gateway_profile_conflict");
+    }
+
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    const execRes = await execute(
+      makeCtx({
+        apiBaseUrl: "http://127.0.0.1:8642/p/coder",
+        apiKey: "secret-key",
+        profile: "reviewer",
+      }),
+    );
+    expect(execRes.exitCode).toBe(1);
+    expect(execRes.errorCode).toBe("hermes_gateway_profile_conflict");
+    expect(fetchMock).not.toHaveBeenCalled();
+
+    const envRes = await testEnvironment({
+      companyId: "company-1",
+      adapterType: "hermes_gateway",
+      config: {
+        apiBaseUrl: "http://127.0.0.1:8642/p/coder",
+        apiKey: "secret-key",
+        profile: "reviewer",
+      },
+    });
+    expect(envRes.status).toBe("fail");
+    expect(envRes.checks.some((c) => c.code === "hermes_gateway_profile_conflict")).toBe(true);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("preserves deployment prefix https://gw.example/hermes with profile=coder", async () => {
+    const targetMod = await import("./target.js");
+    const res = targetMod.resolveGatewayTarget({
+      apiBaseUrl: "https://gw.example/hermes",
+      profile: "coder",
+    });
+    expect(res.ok).toBe(true);
+    if (res.ok) {
+      expect(res.url("/v1/runs")).toBe("https://gw.example/hermes/p/coder/v1/runs");
+    }
+  });
+
+  it.each([
+    ["../x"],
+    ["a/b"],
+    ["a b"],
+    [""],
+    ["%2Fx"],
+    ["a".repeat(65)],
+  ])("rejects invalid profile %j with hermes_gateway_profile_invalid", async (badProfile) => {
+    const targetMod = await import("./target.js");
+    const res = targetMod.resolveGatewayTarget({
+      apiBaseUrl: "http://127.0.0.1:8642",
+      profile: badProfile,
+    });
+    expect(res.ok).toBe(false);
+    if (!res.ok) {
+      expect(res.errorCode).toBe("hermes_gateway_profile_invalid");
+    }
+
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    const envRes = await testEnvironment({
+      companyId: "company-1",
+      adapterType: "hermes_gateway",
+      config: {
+        apiBaseUrl: "http://127.0.0.1:8642",
+        apiKey: "secret-key",
+        profile: badProfile,
+      },
+    });
+    expect(envRes.status).toBe("fail");
+    expect(envRes.checks.some((c) => c.code === "hermes_gateway_profile_invalid")).toBe(true);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("enforces first-class field precedence over payloadTemplate and pins provider in POST /v1/runs body", async () => {
+    const modelOptionsMod = await import("./model-options.js");
+    modelOptionsMod.resetGatewayCatalogCacheForTests?.();
+    process.env.PAPERCLIP_HERMES_ALLOWED_PROVIDERS = "ai-router,headroom-proxy";
+
+    const runRequests: Array<{ url: string; body: Record<string, unknown> }> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        const method = init?.method ?? "GET";
+        if (url.includes("/api/model/options")) {
+          return new Response(
+            JSON.stringify({
+              providers: [
+                {
+                  slug: "ai-router",
+                  name: "9Router Proxy",
+                  is_user_defined: true,
+                  models: ["cb-gemini-flash-high"],
+                },
+              ],
+              provider: "ai-router",
+              model: "cb-gemini-flash-high",
+            }),
+            { status: 200, headers: { "content-type": "application/json" } },
+          );
+        }
+        if (method === "POST" && url.endsWith("/v1/runs")) {
+          runRequests.push({
+            url,
+            body: JSON.parse(String(init?.body ?? "{}")),
+          });
+          return new Response(
+            JSON.stringify({ run_id: "run-s3-1", status: "completed", output: "done" }),
+            { status: 200 },
+          );
+        }
+        return new Response(JSON.stringify({ status: "completed", output: "done" }), {
+          status: 200,
+        });
+      }),
+    );
+
+    const res = await execute(
+      makeCtx({
+        apiBaseUrl: "http://127.0.0.1:8642",
+        apiKey: "secret-key",
+        profile: "coder",
+        provider: "ai-router",
+        model: "cb-gemini-flash-high",
+        payloadTemplate: {
+          provider: "anthropic",
+          model: "x",
+          profile: "other",
+        },
+      }),
+    );
+
+    expect(res.exitCode).toBe(0);
+    expect(runRequests).toHaveLength(1);
+    expect(runRequests[0]!.url).toBe("http://127.0.0.1:8642/p/coder/v1/runs");
+    expect(runRequests[0]!.body.provider).toBe("ai-router");
+    expect(runRequests[0]!.body.model).toBe("cb-gemini-flash-high");
+    expect(runRequests[0]!.body.profile).toBeUndefined();
+  });
+
+  it("omits model key when model is empty or 'auto' while pinning resolved default provider", async () => {
+    const modelOptionsMod = await import("./model-options.js");
+    modelOptionsMod.resetGatewayCatalogCacheForTests?.();
+    process.env.PAPERCLIP_HERMES_ALLOWED_PROVIDERS = "ai-router,headroom-proxy";
+
+    const runBodies: Array<Record<string, unknown>> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        const method = init?.method ?? "GET";
+        if (url.includes("/api/model/options")) {
+          return new Response(
+            JSON.stringify({
+              providers: [
+                {
+                  slug: "ai-router",
+                  name: "9Router Proxy",
+                  is_user_defined: true,
+                  models: ["cb-gemini-flash-high"],
+                },
+              ],
+              provider: "ai-router",
+              model: "cb-gemini-flash-high",
+            }),
+            { status: 200, headers: { "content-type": "application/json" } },
+          );
+        }
+        if (method === "POST" && url.endsWith("/v1/runs")) {
+          runBodies.push(JSON.parse(String(init?.body ?? "{}")));
+          return new Response(
+            JSON.stringify({ run_id: "run-s3-auto", status: "completed", output: "done" }),
+            { status: 200 },
+          );
+        }
+        return new Response(JSON.stringify({ status: "completed", output: "done" }), {
+          status: 200,
+        });
+      }),
+    );
+
+    for (const modelValue of ["", "auto"]) {
+      const res = await execute(
+        makeCtx({
+          apiBaseUrl: "http://127.0.0.1:8642",
+          apiKey: "secret-key",
+          provider: "auto",
+          model: modelValue,
+        }),
+      );
+      expect(res.exitCode).toBe(0);
+    }
+
+    expect(runBodies).toHaveLength(2);
+    for (const body of runBodies) {
+      expect(body.provider).toBe("ai-router");
+      expect("model" in body).toBe(false);
+    }
+  });
+
+  it("fails closed with hermes_effective_provider_unverified and sends no POST /v1/runs request when provider is auto and catalog is unreachable without LKG", async () => {
+    const modelOptionsMod = await import("./model-options.js");
+    modelOptionsMod.resetGatewayCatalogCacheForTests?.();
+    process.env.PAPERCLIP_HERMES_ALLOWED_PROVIDERS = "ai-router,headroom-proxy";
+
+    const postRequests: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if ((init?.method ?? "GET") === "POST") {
+          postRequests.push(url);
+        }
+        return new Response("Service Unavailable", { status: 503 });
+      }),
+    );
+
+    const res = await execute(
+      makeCtx({
+        apiBaseUrl: "http://127.0.0.1:8642",
+        apiKey: "secret-key",
+        provider: "auto",
+        model: "",
+      }),
+    );
+
+    expect(res.exitCode).toBe(1);
+    expect(res.errorCode).toBe("hermes_effective_provider_unverified");
+    expect(postRequests).toHaveLength(0);
+  });
+
+  it("enforces provider authorization and zero POSTs when provider and model fields are completely omitted (SP-03)", async () => {
+    const modelOptionsMod = await import("./model-options.js");
+    modelOptionsMod.resetGatewayCatalogCacheForTests?.();
+    process.env.PAPERCLIP_HERMES_ALLOWED_PROVIDERS = "ai-router,headroom-proxy";
+
+    const postRequests: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.includes("/health")) {
+          return new Response(JSON.stringify({ status: "ok" }), {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          });
+        }
+        if ((init?.method ?? "GET") === "POST") {
+          postRequests.push(url);
+        }
+        return new Response("Service Unavailable", { status: 503 });
+      }),
+    );
+
+    // Omitted provider and omitted model under restrictive policy fails closed before POST
+    const res = await execute(
+      makeCtx({
+        apiBaseUrl: "http://127.0.0.1:8642",
+        apiKey: "secret-key",
+      }),
+    );
+
+    expect(res.exitCode).toBe(1);
+    expect(res.errorCode).toBe("hermes_effective_provider_unverified");
+    expect(postRequests).toHaveLength(0);
+
+    const envRes = await testEnvironment({
+      companyId: "comp-1",
+      adapterType: "hermes_gateway",
+      config: {
+        apiBaseUrl: "http://127.0.0.1:8642",
+        apiKey: "secret-key",
+      },
+    });
+    expect(envRes.status).toBe("fail");
+    expect(envRes.checks.some((c) => c.code === "hermes_effective_provider_unverified")).toBe(true);
+  });
+
+  it("fails closed with hermes_gateway_catalog_invalid and zero POSTs when gateway catalog is malformed or has duplicate slugs (SP-03 remediation)", async () => {
+    const modelOptionsMod = await import("./model-options.js");
+
+    for (const badPayload of [{}, { providers: [{ slug: "router-a", models: ["m"] }, { slug: "router-a", models: ["m"] }] }]) {
+      modelOptionsMod.resetGatewayCatalogCacheForTests?.();
+      delete process.env.PAPERCLIP_HERMES_ALLOWED_PROVIDERS;
+
+      const postRequests: string[] = [];
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+          const url = String(input);
+          if (url.includes("/health")) {
+            return new Response(JSON.stringify({ status: "ok" }), {
+              status: 200,
+              headers: { "content-type": "application/json" },
+            });
+          }
+          if (url.includes("/api/model/options")) {
+            return new Response(JSON.stringify(badPayload), {
+              status: 200,
+              headers: { "content-type": "application/json" },
+            });
+          }
+          if ((init?.method ?? "GET") === "POST") {
+            postRequests.push(url);
+          }
+          return new Response("Service Unavailable", { status: 503 });
+        }),
+      );
+
+      const res = await execute(
+        makeCtx({
+          apiBaseUrl: "http://127.0.0.1:8642",
+          apiKey: "secret-key",
+        }),
+      );
+
+      expect(res.exitCode).toBe(1);
+      expect(res.errorCode).toBe("hermes_gateway_catalog_invalid");
+      expect(postRequests).toHaveLength(0);
+
+      const testRes = await testEnvironment({
+        companyId: "comp-1",
+        adapterType: "hermes_gateway",
+        config: {
+          apiBaseUrl: "http://127.0.0.1:8642",
+          apiKey: "secret-key",
+        },
+      });
+      expect(testRes.status).toBe("fail");
+      expect(testRes.checks.some((c) => c.code === "hermes_gateway_catalog_invalid")).toBe(true);
+    }
   });
 });

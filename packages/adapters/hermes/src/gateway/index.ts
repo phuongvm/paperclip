@@ -1,10 +1,20 @@
 import type { AdapterSessionManagement, ServerAdapterModule } from "@paperclipai/adapter-utils";
 import { ADAPTER_LABEL, ADAPTER_TYPE } from "./shared/constants.js";
-import { execute, getConfigSchema, sessionCodec, testEnvironment } from "./server/index.js";
+import {
+  execute,
+  getConfigSchema,
+  listHermesGatewayModels,
+  refreshHermesGatewayModels,
+  sessionCodec,
+  testEnvironment,
+} from "./server/index.js";
 
 export const type = ADAPTER_TYPE;
 export const label = ADAPTER_LABEL;
 export const models: { id: string; label: string }[] = [];
+export const listModels = listHermesGatewayModels;
+export const refreshModels = refreshHermesGatewayModels;
+export { getConfigSchema };
 
 const sessionManagement: AdapterSessionManagement = {
   supportsSessionResume: true,
@@ -64,6 +74,9 @@ export function createServerAdapter(): ServerAdapterModule {
     sessionCodec,
     sessionManagement,
     models,
+    listModels: listHermesGatewayModels,
+    refreshModels: refreshHermesGatewayModels,
+    supportsAgentScopedCatalog: true,
     supportsLocalAgentJwt: false,
     supportsInstructionsBundle: false,
     requiresMaterializedRuntimeSkills: false,

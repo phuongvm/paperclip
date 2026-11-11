@@ -173,6 +173,7 @@ import {
   type WorkspaceDiffReprojectionSkipReason,
 } from "../services/provider-trace-workspace-diff-reprojection.js";
 import {
+  buildAdapterCatalogContext,
   detectAdapterModel,
   findActiveServerAdapter,
   findServerAdapter,
@@ -3182,9 +3183,21 @@ export function agentRoutes(
       res.json(requireServerAdapter(modelAdapterType).models ?? []);
       return;
     }
+    const modelAgentId = asNonEmptyString(req.query.agentId);
+    const targetAdapter = findActiveServerAdapter(modelAdapterType);
+    const catalogCtx =
+      modelAgentId && targetAdapter?.supportsAgentScopedCatalog
+        ? await buildAdapterCatalogContext({
+            db,
+            req,
+            companyId,
+            adapterType: modelAdapterType,
+            agentId: modelAgentId,
+          })
+        : null;
     const models = refresh
-      ? await refreshAdapterModels(modelAdapterType)
-      : await listAdapterModels(modelAdapterType);
+      ? await refreshAdapterModels(modelAdapterType, catalogCtx ?? undefined)
+      : await listAdapterModels(modelAdapterType, catalogCtx ?? undefined);
     // The Legacy default marker is not an explicit native ACP model ID.
     res.json(type === "paperclip_runner" && modelAdapterType === "grok_local"
       ? models.filter(model => model.id !== "grok-build")

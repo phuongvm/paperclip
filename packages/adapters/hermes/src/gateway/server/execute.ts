@@ -27,6 +27,11 @@ import {
   isRemotePlainHttp,
   remotePlainHttpDeniedMessage,
 } from "./transport-security.js";
+import { resolveGatewayTarget } from "./target.js";
+import {
+  buildRunSelection,
+  fetchGatewayModelOptionsCatalog,
+} from "./model-options.js";
 
 type SessionKeyStrategy = "issue" | "agent" | "run" | "none";
 
@@ -390,19 +395,30 @@ function buildInput(ctx: AdapterExecutionContext, paperclipApiUrl: string | null
   return lines.filter((line) => line !== null && line !== undefined).join("\n").trim();
 }
 
-function buildRunBody(ctx: AdapterExecutionContext, sessionKey: string | null): Record<string, unknown> {
+function buildRunBody(
+  ctx: AdapterExecutionContext,
+  sessionKey: string | null,
+  selection?: { provider?: string; model?: string; model_options?: Record<string, unknown> },
+): Record<string, unknown> {
   const paperclipApiUrl = nonEmpty(ctx.config.paperclipApiUrl);
-  const payloadTemplate = parseObject(ctx.config.payloadTemplate);
-  const configuredInput = nonEmpty(payloadTemplate.input);
+  const rawPayloadTemplate = parseObject(ctx.config.payloadTemplate);
+  const {
+    provider: _tplProvider,
+    model: _tplModel,
+    profile: _tplProfile,
+    ...payloadTemplate
+  } = rawPayloadTemplate;
+  const configuredInput = nonEmpty(rawPayloadTemplate.input);
   const input = configuredInput && ctx.context.conversationMode === true
     ? `${configuredInput}\n\n${buildInput(ctx, paperclipApiUrl)}`
     : configuredInput ?? buildInput(ctx, paperclipApiUrl);
   const instructions =
     nonEmpty(ctx.config.instructions) ??
-    nonEmpty(payloadTemplate.instructions) ??
+    nonEmpty(rawPayloadTemplate.instructions) ??
     "Follow the Paperclip wake instructions exactly. Do not expose secrets in logs, comments, or final output.";
   return {
     ...payloadTemplate,
+    ...(selection ?? {}),
     input,
     instructions,
     ...(sessionKey ? { session_id: sessionKey } : {}),
@@ -902,17 +918,25 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     };
   }
 
-  const baseUrl = normalizeBaseUrl(apiBaseUrlValue);
-  if (!baseUrl) {
+  const target = resolveGatewayTarget(ctx.config);
+  if (!target.ok) {
+    const errorCode =
+      target.errorCode === "hermes_gateway_url_invalid"
+        ? "hermes_gateway_api_base_url_invalid"
+        : target.errorCode;
     return {
       exitCode: 1,
       signal: null,
       timedOut: false,
-      errorCode: "hermes_gateway_api_base_url_invalid",
-      errorMessage: `Invalid Hermes gateway apiBaseUrl: ${apiBaseUrlValue}`,
+      errorCode,
+      errorMessage:
+        target.errorCode === "hermes_gateway_url_invalid"
+          ? `Invalid Hermes gateway apiBaseUrl: ${apiBaseUrlValue}`
+          : target.message,
       resultJson: { connectionFailure: gatewayConfigurationFailure("endpoint_invalid") },
     };
   }
+  const baseUrl = target.root;
   if (isRemotePlainHttp(baseUrl) && !allowsInsecureRemoteHttp(ctx.config)) {
     return {
       exitCode: 1,
@@ -935,6 +959,99 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       resultJson: { connectionFailure: gatewayConfigurationFailure("credentials_missing") },
     };
   }
+
+  let redactText = createTextRedactor([apiKey, `Bearer ${apiKey}`]);
+
+  // This adapter has no local child process, so crossing into the first
+  // remote request is its dispatch boundary. Report it before the
+  // request can block so continuation gates may release their issue lock.
+  try {
+    ctx.onDispatch?.();
+  } catch (err) {
+    return errorResult(err, baseUrl, redactText);
+  }
+
+  const catalogRes = await fetchGatewayModelOptionsCatalog({
+    apiBaseUrl: apiBaseUrlValue,
+    profile: target.profile,
+    authHeader: `Bearer ${apiKey}`,
+    allowInsecureRemoteHttp: allowsInsecureRemoteHttp(ctx.config),
+  });
+
+  const sel = buildRunSelection(ctx.config, catalogRes.parsed?.catalog ?? null);
+  if (!sel.ok) {
+    await ctx.onLog(
+      "stderr",
+      `[hermes-gateway] provider authorization failed: code=${sel.errorCode} provider=${sel.provider ?? "auto"} resolvedFrom=${sel.resolvedFrom ?? "unknown"}\n`,
+    );
+    return {
+      exitCode: 1,
+      signal: null,
+      timedOut: false,
+      errorCode: sel.errorCode,
+      errorMessage: `Hermes gateway provider validation failed (${sel.errorCode}${sel.provider ? `: ${sel.provider}` : ""}).`,
+    };
+  }
+
+  if (catalogRes.failure && !catalogRes.parsed) {
+    if (
+      catalogRes.failure.reason === "invalid_payload" ||
+      catalogRes.failure.reason === "duplicate_slug"
+    ) {
+      await ctx.onLog?.(
+        "stderr",
+        `[hermes-gateway] catalog discovery failed: reason=${catalogRes.failure.reason}\n`,
+      );
+      return {
+        exitCode: 1,
+        signal: null,
+        timedOut: false,
+        errorCode: "hermes_gateway_catalog_invalid",
+        errorMessage: `Hermes gateway /api/model/options returned an invalid catalog (${catalogRes.failure.reason}).`,
+        resultJson: {
+          connectionFailure: gatewayConfigurationFailure("endpoint_invalid"),
+        },
+      };
+    }
+    if (catalogRes.failure.reason === "network_error") {
+      const fetchErr = new Error(
+        `Hermes gateway request failed: ${fetchFailureMessage(catalogRes.failure.error)}`,
+      ) as HermesHttpError;
+      fetchErr.code = "hermes_gateway_connect_failed";
+      fetchErr.transportCause =
+        catalogRes.failure.error instanceof Error
+          ? (catalogRes.failure.error as any).cause
+          : undefined;
+      rememberNetworkFailure(fetchErr, catalogRes.failure.error);
+      return errorResult(fetchErr, baseUrl, redactText);
+    }
+    if (
+      catalogRes.failure.reason === "unauthorized" ||
+      catalogRes.failure.reason === "http_error"
+    ) {
+      const status =
+        catalogRes.failure.status ??
+        (catalogRes.failure.reason === "unauthorized" ? 401 : 500);
+      const classified = classifyHttpError(status);
+      const err = new Error(`Hermes gateway HTTP ${status}`) as HermesHttpError;
+      err.status = status;
+      err.code = classified.code;
+      err.retryNotBefore = catalogRes.failure.retryAfter;
+      err.body = catalogRes.failure.body;
+      const reason = httpFailureReason(status);
+      if (reason) {
+        requestConnectionFailures.set(err, {
+          schemaVersion: 1,
+          provider: "hermes_gateway",
+          operation: "create_run",
+          reason,
+        });
+      }
+      return errorResult(err, baseUrl, redactText);
+    }
+  }
+
+  const runSelection = sel.selection;
 
   const timeoutSec = parseNonNegativeNumber(ctx.config.timeoutSec, DEFAULT_TIMEOUT_SEC);
   const timeoutMs = timeoutSec > 0 ? Math.ceil(timeoutSec * 1000) : 0;
@@ -964,14 +1081,15 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     extraHeaders,
     accept: "text/event-stream",
   });
-  const redactText = createTextRedactor([
+  redactText = createTextRedactor([
     apiKey,
     sessionKey,
     runHeaders.Authorization,
     runHeaders["X-Hermes-Session-Key"],
   ]);
-  const body = buildRunBody(ctx, sessionKey);
-  const createRunUrl = apiUrl(baseUrl, "/v1/runs");
+  const body = buildRunBody(ctx, sessionKey, runSelection);
+  const createRunUrl = target.url("/v1/runs");
+  const targetBaseUrl = new URL(target.url(""));
 
   await ctx.onMeta?.({
     adapterType: ADAPTER_TYPE,
@@ -990,10 +1108,6 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
 
   let runId: string | null = null;
   try {
-    // This adapter has no local child process, so crossing into the first
-    // remote create request is its dispatch boundary. Report it before the
-    // request can block so continuation gates may release their issue lock.
-    ctx.onDispatch?.();
     const created = await fetchJson(createRunUrl, {
       method: "POST",
       headers: runHeaders,
@@ -1020,7 +1134,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   const controller = new AbortController();
   void consumeEvents({
     ctx,
-    baseUrl,
+    baseUrl: targetBaseUrl,
     headers: eventHeaders,
     state,
     signal: controller.signal,
@@ -1029,7 +1143,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   }).catch(() => undefined);
   void pollStatus({
     ctx,
-    baseUrl,
+    baseUrl: targetBaseUrl,
     headers: eventHeaders,
     state,
     signal: controller.signal,
@@ -1048,8 +1162,8 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   controller.abort();
 
   if (outcome === "timeout") {
-    await stopRun({ ctx, baseUrl, headers: eventHeaders, runId, redactText });
-    const finalStatus = await fetchFinalStatus({ baseUrl, headers: eventHeaders, runId, deadlineMs: STOP_GRACE_MS });
+    await stopRun({ ctx, baseUrl: targetBaseUrl, headers: eventHeaders, runId, redactText });
+    const finalStatus = await fetchFinalStatus({ baseUrl: targetBaseUrl, headers: eventHeaders, runId, deadlineMs: STOP_GRACE_MS });
     return {
       exitCode: 1,
       signal: null,

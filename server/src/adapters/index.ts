@@ -10,6 +10,10 @@ export {
   unregisterServerAdapter,
   requireServerAdapter,
 } from "./registry.js";
+export {
+  buildAdapterCatalogContext,
+  computeCatalogCacheKey,
+} from "./catalog-context.js";
 export type {
   ServerAdapterModule,
   AcpTargetDescriptor,

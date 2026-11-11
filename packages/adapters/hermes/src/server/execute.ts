@@ -44,14 +44,10 @@ import {
   HERMES_CLI,
   DEFAULT_TIMEOUT_SEC,
   DEFAULT_GRACE_SEC,
-  DEFAULT_MODEL,
-  VALID_PROVIDERS,
 } from "../shared/constants.js";
 
-import {
-  detectModel,
-  resolveProvider,
-} from "./detect-model.js";
+import { computePolicy, loadHermesCatalog } from "./catalog.js";
+import { resolveHermesInvocation } from "./resolver.js";
 import { reconcileHermesPaperclipSkills } from "./skills.js";
 
 // ---------------------------------------------------------------------------
@@ -349,7 +345,8 @@ export async function execute(
 
   // ── Resolve configuration ──────────────────────────────────────────────
   const hermesCmd = resolveHermesCommand(config);
-  const model = cfgString(config.model) || DEFAULT_MODEL;
+  const rawConfigModel = cfgString(config.model);
+  const rawConfigProvider = cfgString(config.provider);
   const timeoutSec = cfgNumber(config.timeoutSec) || DEFAULT_TIMEOUT_SEC;
   const graceSec = cfgNumber(config.graceSec) || DEFAULT_GRACE_SEC;
   const maxTurns = cfgNumber(config.maxTurnsPerRun);
@@ -381,36 +378,41 @@ export async function execute(
     }
   }
 
-  // ── Resolve provider (defense in depth) ────────────────────────────────
-  // Priority chain:
-  //   1. Explicit provider in adapterConfig (user override)
-  //   2. Provider from ~/.hermes/config.yaml (detected at runtime)
-  //   3. Provider inferred from model name prefix
-  //   4. "auto" (let Hermes decide)
-  //
-  // This ensures that even if the agent was created before provider tracking
-  // was added, or if the model was changed without updating provider, the
-  // correct provider is still used.
-  let detectedConfig: Awaited<ReturnType<typeof detectModel>> | null = null;
-  const explicitProvider = cfgString(config.provider);
+  // ── Resolve & authorize provider/model before spawn ────────────────────
+  const catalog = await loadHermesCatalog(config);
+  const policy = computePolicy(catalog, process.env);
+  const resolution = resolveHermesInvocation({
+    configModel: rawConfigModel,
+    configProvider: rawConfigProvider,
+    catalog,
+    policy,
+  });
 
-  if (!explicitProvider) {
-    try {
-      detectedConfig = await detectModel(undefined, config);
-    } catch {
-      // Non-fatal — detection failure shouldn't block execution
-    }
+  if (!resolution.ok) {
+    const providerLabel = resolution.provider ?? "unverified";
+    const resolvedFrom = resolution.resolvedFrom ?? "policy";
+    const errMsg = `[hermes] Provider authorization failed: code=${resolution.errorCode} provider=${providerLabel} resolvedFrom=${resolvedFrom}${resolution.reason ? ` reason=${resolution.reason}` : ""}`;
+    await ctx.onLog("stderr", `${errMsg}\n`);
+    return {
+      exitCode: 1,
+      signal: null,
+      timedOut: false,
+      provider: resolution.provider,
+      model: rawConfigModel,
+      errorMessage: errMsg,
+      resultJson: {
+        result: "",
+        session_id: null,
+        usage: null,
+        cost_usd: null,
+        error_code: resolution.errorCode,
+      },
+    };
   }
 
-  const { provider: resolvedProvider, resolvedFrom } = resolveProvider({
-    explicitProvider,
-    detectedProvider: detectedConfig?.provider,
-    detectedModel: detectedConfig?.model,
-    detectedBaseUrl: detectedConfig?.baseUrl,
-    detectedHasApiKey: detectedConfig?.hasApiKey,
-    detectedApiMode: detectedConfig?.apiMode,
-    model,
-  });
+  const model = resolution.model;
+  const resolvedProvider = resolution.provider ?? "auto";
+  const resolvedFrom = resolution.resolvedFrom;
 
   // ── Load agent instructions file (Paperclip instruction bundles) ──────
   // Paperclip can materialize managed instructions into instructionsFilePath;

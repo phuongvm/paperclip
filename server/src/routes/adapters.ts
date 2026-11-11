@@ -33,6 +33,7 @@ import {
   setOverridePaused,
   waitForExternalAdapters,
 } from "../adapters/registry.js";
+import { buildAdapterCatalogContext } from "../adapters/catalog-context.js";
 import {
   listAdapterPlugins,
   addAdapterPlugin,
@@ -254,6 +255,7 @@ export function adapterRoutes(options: {
   getNativeRunnerEnabled?: () => Promise<boolean>;
   getOpenAiDotEnabled?: () => Promise<boolean>;
   resolveRunnerTarget?: (companyId: string, environmentId?: string) => Promise<RunnerTarget>;
+  buildCatalogContext?: typeof buildAdapterCatalogContext;
 } = {}) {
   const router = Router();
   const settings = adapterSettingsService(options.db);
@@ -785,28 +787,48 @@ export function adapterRoutes(options: {
   router.get("/adapters/:type/config-schema", async (req, res) => {
     // Config schemas are read-only form metadata used when org members create
     // or edit agents; they do not install or execute new adapter code.
-    assertBoardOrgAccess(req);
     const { type } = req.params;
+    const companyId =
+      typeof req.query.companyId === "string" ? req.query.companyId.trim() : "";
+    const agentId =
+      typeof req.query.agentId === "string" ? req.query.agentId.trim() : "";
 
     const adapter = findActiveServerAdapter(type);
     if (!adapter) {
+      assertBoardOrgAccess(req);
       res.status(404).json({ error: `Adapter "${type}" is not registered.` });
       return;
     }
     if (!adapter.getConfigSchema) {
+      assertBoardOrgAccess(req);
       res.status(404).json({ error: `Adapter "${type}" does not provide a config schema.` });
       return;
     }
 
-    const cached = configSchemaCache.get(type);
+    let catalogCtx: import("../adapters/types.js").AdapterCatalogContext | null = null;
+    if (adapter.supportsAgentScopedCatalog && companyId && agentId) {
+      const resolveCtx = options.buildCatalogContext ?? buildAdapterCatalogContext;
+      catalogCtx = await resolveCtx({
+        db: options.db,
+        req,
+        companyId,
+        adapterType: type,
+        agentId,
+      });
+    } else {
+      assertBoardOrgAccess(req);
+    }
+
+    const cacheKey = catalogCtx ? `${type}:${catalogCtx.cacheKey}` : type;
+    const cached = configSchemaCache.get(cacheKey);
     if (cached && cached.adapter === adapter && Date.now() - cached.fetchedAt < CONFIG_SCHEMA_TTL_MS) {
       res.json(cached.schema);
       return;
     }
 
     try {
-      const schema = await adapter.getConfigSchema();
-      configSchemaCache.set(type, { adapter, schema, fetchedAt: Date.now() });
+      const schema = await adapter.getConfigSchema(catalogCtx ?? undefined);
+      configSchemaCache.set(cacheKey, { adapter, schema, fetchedAt: Date.now() });
       res.json(schema);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);

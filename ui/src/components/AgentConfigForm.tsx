@@ -183,7 +183,85 @@ const emptyOverlay: AgentConfigOverlay = {
 const EMPTY_ENV: Record<string, EnvBinding> = {};
 
 export function supportsAdapterModelRefresh(adapterType: string): boolean {
-  return adapterType === "claude_local" || adapterType === "codex_local" || adapterType === "paperclip_runner" || adapterType === "opencode_local";
+  return (
+    adapterType === "claude_local" ||
+    adapterType === "codex_local" ||
+    adapterType === "paperclip_runner" ||
+    adapterType === "opencode_local" ||
+    adapterType === "hermes_local"
+  );
+}
+
+export function shouldGroupModelsByProvider(
+  adapterType: string,
+  hasConnectionModels = false,
+): boolean {
+  return (
+    !hasConnectionModels &&
+    (adapterType === "opencode_local" ||
+      adapterType === "pi_local" ||
+      adapterType === "hermes_local")
+  );
+}
+
+export function selectionFromOption(option: AdapterModel): {
+  provider: string;
+  model: string;
+} {
+  const provider = option.providerId ? option.providerId.trim().toLowerCase() : "auto";
+  const model =
+    typeof option.rawModelId === "string" && option.rawModelId.length > 0
+      ? option.rawModelId
+      : option.label || option.id;
+  return { provider, model };
+}
+
+export function composeHermesOptionId(
+  selection: { provider?: string | null; model?: string | null },
+  models: AdapterModel[],
+): string {
+  const rawModel = typeof selection.model === "string" ? selection.model.trim() : "";
+  if (!rawModel || rawModel.toLowerCase() === "auto") return "";
+  const rawProvider =
+    typeof selection.provider === "string" ? selection.provider.trim().toLowerCase() : "";
+  if (rawProvider && rawProvider !== "auto") {
+    const exact = models.find(
+      (m) =>
+        (m.providerId ?? "").trim().toLowerCase() === rawProvider &&
+        (m.rawModelId ?? m.label) === rawModel,
+    );
+    return exact ? exact.id : rawModel;
+  }
+  const matches = models.filter((m) => (m.rawModelId ?? m.label) === rawModel);
+  if (matches.length === 1) {
+    return matches[0]!.id;
+  }
+  return rawModel;
+}
+
+export function resolveHermesModelDropdownChange(
+  selectedId: string,
+  models: AdapterModel[],
+  currentProvider?: string | null,
+): { provider?: string; model: string; matchedOption: boolean } {
+  const trimmed = selectedId.trim();
+  const normalizedCurrent =
+    typeof currentProvider === "string" && currentProvider.trim().length > 0
+      ? currentProvider.trim().toLowerCase()
+      : undefined;
+  if (!trimmed) {
+    return { provider: normalizedCurrent, model: "", matchedOption: false };
+  }
+  const matched = models.find((m) => m.id === trimmed);
+  if (matched && (matched.providerId || matched.rawModelId)) {
+    const decoded = selectionFromOption(matched);
+    return { provider: decoded.provider, model: decoded.model, matchedOption: true };
+  }
+  return {
+    provider: normalizedCurrent,
+    model: trimmed,
+    matchedOption: false,
+  };
 }
 
 export function resolvePaperclipRunnerTransitionModel(
@@ -1426,6 +1504,13 @@ export function AgentConfigForm(props: AgentConfigFormProps) {
     ? val!.model ?? ""
     : eff("adapterConfig", "model", String(config.model ?? ""));
   const currentModelId = typeof currentModelValue === "string" ? currentModelValue : "";
+  const currentHermesProvider = isCreate
+    ? String(val!.adapterSchemaValues?.provider ?? "auto")
+    : String(eff("adapterConfig", "provider", String(config.provider ?? "auto")));
+  const effectiveModelDropdownValue =
+    adapterType === "hermes_local"
+      ? composeHermesOptionId({ provider: currentHermesProvider, model: currentModelId }, models)
+      : currentModelId;
 
   async function handleRefreshModels() {
     if (!selectedCompanyId) return;
@@ -1957,8 +2042,34 @@ export function AgentConfigForm(props: AgentConfigFormProps) {
               <ModelDropdown
                 models={models}
                 loadingModels={connectionModels?.isLoading ?? (fetchingModels || fetchedModelsView.kind === "reconnecting")}
-                value={currentModelId}
+                value={effectiveModelDropdownValue}
                 onChange={(v) => {
+                  if (adapterType === "hermes_local") {
+                    const resolved = resolveHermesModelDropdownChange(
+                      v,
+                      models,
+                      currentHermesProvider,
+                    );
+                    if (isCreate) {
+                      set!({
+                        model: resolved.model,
+                        ...(resolved.matchedOption && resolved.provider
+                          ? {
+                              adapterSchemaValues: {
+                                ...(val!.adapterSchemaValues ?? {}),
+                                provider: resolved.provider,
+                              },
+                            }
+                          : {}),
+                      });
+                      return;
+                    }
+                    if (resolved.matchedOption && resolved.provider) {
+                      mark("adapterConfig", "provider", resolved.provider);
+                    }
+                    mark("adapterConfig", "model", resolved.model || undefined);
+                    return;
+                  }
                   const supportedEfforts = setupEfforts(isRunnerHarness ? harnessType : adapterType, v);
                   const clearUnsupportedEffort = ["codex_local", "claude_local", "grok_local"].includes(isRunnerHarness ? harnessType : adapterType)
                     && Boolean(currentThinkingEffort)
@@ -1980,7 +2091,7 @@ export function AgentConfigForm(props: AgentConfigFormProps) {
                 defaultLabel={adapterType === "claude_local" ? `Default (${DEFAULT_CLAUDE_LOCAL_MODEL})` : undefined}
                 allowDefault={adapterType !== "opencode_local" && adapterType !== "pi_local" && adapterType !== "paperclip_runner" && !isCursorCloudRunner}
                 required={adapterType === "opencode_local" || adapterType === "pi_local" || isCursorCloudRunner || runnerAcpxAgent === "antigravity"}
-                groupByProvider={!connectionModels && (adapterType === "opencode_local" || adapterType === "pi_local")}
+                groupByProvider={shouldGroupModelsByProvider(adapterType, Boolean(connectionModels))}
                 preserveOrder={Boolean(connectionModels) || adapterCuratesModelOrder(adapterType)}
                 creatable
                 detectedModel={connectionModels ? undefined : detectedModel}

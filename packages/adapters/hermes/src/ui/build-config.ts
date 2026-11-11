@@ -10,23 +10,69 @@
  * ~/.hermes/config.yaml at runtime.
  */
 
-import type { CreateConfigValues } from "@paperclipai/adapter-utils";
+import type { AdapterModel, CreateConfigValues } from "@paperclipai/adapter-utils";
 
 import {
   DEFAULT_TIMEOUT_SEC,
 } from "../shared/constants.js";
 
+function normalizeHermesSlug(slug: string): string {
+  return String(slug ?? "").trim().toLowerCase();
+}
+
+function decodeSelectedOption(option: AdapterModel): { provider: string; model: string } {
+  const provider = option.providerId ? normalizeHermesSlug(option.providerId) : "auto";
+  const model =
+    typeof option.rawModelId === "string" && option.rawModelId.length > 0
+      ? option.rawModelId
+      : option.label || option.id;
+  return { provider, model };
+}
+
 /**
  * Build a Hermes Agent adapter config from the Paperclip UI form values.
  */
 export function buildHermesConfig(
-  v: CreateConfigValues,
+  v: CreateConfigValues & {
+    selectedAdapterModel?: AdapterModel | null;
+    adapterModels?: AdapterModel[];
+  },
 ): Record<string, unknown> {
   const ac: Record<string, unknown> = {};
 
-  // Model
-  if (v.model.trim()) {
-    ac.model = v.model.trim();
+  if (v.adapterSchemaValues && typeof v.adapterSchemaValues === "object") {
+    Object.assign(ac, v.adapterSchemaValues);
+  }
+
+  const matchedOption =
+    v.selectedAdapterModel ??
+    (Array.isArray(v.adapterModels) && typeof v.model === "string"
+      ? v.adapterModels.find((m) => m.id === v.model) ?? null
+      : null);
+
+  if (matchedOption) {
+    const decoded = decodeSelectedOption(matchedOption);
+    if (decoded.model && decoded.model.toLowerCase() !== "auto") {
+      ac.model = decoded.model;
+    }
+    const existingProvider =
+      typeof ac.provider === "string" ? normalizeHermesSlug(ac.provider) : "";
+    if (!existingProvider || existingProvider === "auto") {
+      ac.provider = decoded.provider;
+    } else {
+      ac.provider = existingProvider;
+    }
+  } else {
+    // Model (never persist literal "auto")
+    const rawModel = typeof v.model === "string" ? v.model.trim() : "";
+    if (rawModel && rawModel.toLowerCase() !== "auto") {
+      ac.model = rawModel;
+    } else if ("model" in ac && String(ac.model ?? "").trim().toLowerCase() === "auto") {
+      delete ac.model;
+    }
+    if (typeof ac.provider === "string" && ac.provider.trim().length > 0) {
+      ac.provider = normalizeHermesSlug(ac.provider);
+    }
   }
 
   // NOTE: Provider is NOT set here because the Paperclip UI form
