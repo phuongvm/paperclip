@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  fetchGatewayModelOptionsCatalog,
   getHermesGatewayConfigSchema,
   listHermesGatewayModels,
   parseModelOptionsPayload,
@@ -359,5 +360,73 @@ describe("hermes_gateway /api/model/options parser and Tier 1 catalog (S3 Task 3
     expect(JSON.stringify(tier2Models)).not.toContain(secretValue);
     expect(ctx.cacheKey).not.toContain(secretValue);
     expect(warnSpy.mock.calls.flat().join(" ")).not.toContain(secretValue);
+  });
+
+  it("enforces transport security on catalog discovery (ST-01)", async () => {
+    const fetchSpy = vi.fn();
+    vi.stubGlobal("fetch", fetchSpy);
+
+    // 1. Remote plain HTTP without escape hatch is denied before fetch
+    const denied = await fetchGatewayModelOptionsCatalog({
+      apiBaseUrl: "http://gateway.example:8642",
+      authHeader: "Bearer test-key",
+    });
+    expect(denied).toEqual({
+      parsed: null,
+      failure: { ok: false, reason: "insecure_transport" },
+      fromLastKnownGood: false,
+    });
+    expect(fetchSpy).not.toHaveBeenCalled();
+
+    // 2. Remote plain HTTP with allowInsecureRemoteHttp=true proceeds to fetch
+    fetchSpy.mockResolvedValueOnce(
+      new Response(JSON.stringify(REDACTED_MODEL_OPTIONS_PAYLOAD), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+    const allowed = await fetchGatewayModelOptionsCatalog({
+      apiBaseUrl: "http://gateway.example:8642",
+      authHeader: "Bearer test-key",
+      allowInsecureRemoteHttp: true,
+      refresh: true,
+    });
+    expect(allowed.failure).toBeNull();
+    expect(allowed.parsed).not.toBeNull();
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+
+    // 3. Loopback plain HTTP is allowed without escape hatch
+    fetchSpy.mockResolvedValueOnce(
+      new Response(JSON.stringify(REDACTED_MODEL_OPTIONS_PAYLOAD), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+    const loopback = await fetchGatewayModelOptionsCatalog({
+      apiBaseUrl: "http://127.0.0.1:8642",
+      authHeader: "Bearer test-key",
+      refresh: true,
+    });
+    expect(loopback.failure).toBeNull();
+    expect(loopback.parsed).not.toBeNull();
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
+
+    // 4. Remote HTTPS is allowed without escape hatch
+    fetchSpy.mockResolvedValueOnce(
+      new Response(JSON.stringify(REDACTED_MODEL_OPTIONS_PAYLOAD), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+    const https = await fetchGatewayModelOptionsCatalog({
+      apiBaseUrl: "https://gateway.example:8642",
+      authHeader: "Bearer test-key",
+      refresh: true,
+    });
+    expect(https.failure).toBeNull();
+    expect(https.parsed).not.toBeNull();
+    expect(fetchSpy).toHaveBeenCalledTimes(3);
+
+    vi.unstubAllGlobals();
   });
 });

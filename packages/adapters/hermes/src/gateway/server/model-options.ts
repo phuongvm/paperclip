@@ -10,7 +10,10 @@ import {
   DEFAULT_TIMEOUT_SEC,
 } from "../shared/constants.js";
 import { VALID_PROVIDERS } from "../../shared/constants.js";
-import { INSECURE_REMOTE_HTTP_ESCAPE_HATCH } from "./transport-security.js";
+import {
+  INSECURE_REMOTE_HTTP_ESCAPE_HATCH,
+  isRemotePlainHttp,
+} from "./transport-security.js";
 import {
   computePolicy,
   loadHermesCatalog,
@@ -45,8 +48,12 @@ export type GatewayCatalogFailure = {
     | "unauthorized"
     | "http_error"
     | "network_error"
-    | "invalid_target";
+    | "invalid_target"
+    | "insecure_transport";
   status?: number;
+  error?: unknown;
+  body?: unknown;
+  retryAfter?: string | null;
 };
 
 type CachedGatewayCatalogEntry = {
@@ -172,6 +179,7 @@ export async function fetchGatewayModelOptionsCatalog(input: {
   cacheKey?: string;
   refresh?: boolean;
   env?: NodeJS.ProcessEnv;
+  allowInsecureRemoteHttp?: boolean;
 }): Promise<{
   parsed: ParsedGatewayCatalog | null;
   failure: GatewayCatalogFailure | null;
@@ -185,6 +193,15 @@ export async function fetchGatewayModelOptionsCatalog(input: {
     return {
       parsed: null,
       failure: { ok: false, reason: "invalid_target" },
+      fromLastKnownGood: false,
+    };
+  }
+
+  if (isRemotePlainHttp(target.root) && !input.allowInsecureRemoteHttp) {
+    logCatalogFailure("insecure_transport_denied", target.root.host);
+    return {
+      parsed: null,
+      failure: { ok: false, reason: "insecure_transport" },
       fromLastKnownGood: false,
     };
   }
@@ -225,6 +242,12 @@ export async function fetchGatewayModelOptionsCatalog(input: {
         response.status === 401 || response.status === 403
           ? "unauthorized"
           : "http_error";
+      let body: unknown = null;
+      try {
+        body = await response.json();
+      } catch {
+        body = null;
+      }
       logCatalogFailure(
         reason === "unauthorized"
           ? "hermes_gateway_catalog_unauthorized"
@@ -234,7 +257,13 @@ export async function fetchGatewayModelOptionsCatalog(input: {
       const lkg = lastKnownGoodCatalogCache.get(cacheKey) ?? null;
       return {
         parsed: lkg,
-        failure: { ok: false, reason, status: response.status },
+        failure: {
+          ok: false,
+          reason,
+          status: response.status,
+          body,
+          retryAfter: response.headers.get("retry-after"),
+        },
         fromLastKnownGood: Boolean(lkg),
       };
     }
@@ -262,12 +291,12 @@ export async function fetchGatewayModelOptionsCatalog(input: {
       failure: null,
       fromLastKnownGood: false,
     };
-  } catch {
+  } catch (error) {
     logCatalogFailure("network_or_timeout", target.root.host);
     const lkg = lastKnownGoodCatalogCache.get(cacheKey) ?? null;
     return {
       parsed: lkg,
-      failure: { ok: false, reason: "network_error" },
+      failure: { ok: false, reason: "network_error", error },
       fromLastKnownGood: Boolean(lkg),
     };
   }
@@ -304,6 +333,7 @@ async function resolveGatewayCatalogSource(
       authHeader: ctx.authHeader,
       cacheKey: ctx.cacheKey,
       refresh: options?.refresh,
+      allowInsecureRemoteHttp: ctx.allowInsecureRemoteHttp,
     });
     if (res.parsed) {
       return {
@@ -326,6 +356,7 @@ async function resolveGatewayCatalogSource(
       profile: tier1Env.profile,
       authHeader: tier1Env.authHeader,
       refresh: options?.refresh,
+      allowInsecureRemoteHttp: false,
     });
     if (res.parsed) {
       return {

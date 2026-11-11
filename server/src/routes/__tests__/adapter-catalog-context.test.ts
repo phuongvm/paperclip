@@ -262,4 +262,38 @@ describe("Tier 2 agent-scoped adapter catalog context (S3b Task 4.2)", () => {
     expect(JSON.stringify(resA.body)).not.toContain(rawSecretA);
     expect(JSON.stringify(resB.body)).not.toContain(rawSecretB);
   });
+
+  it("ignores companyId and agentId for non-opt-in adapters without failing (SP-02)", async () => {
+    const buildCtxSpy = vi.fn();
+    const app = express();
+    app.use((req, _res, next) => {
+      (req as unknown as { actor: unknown }).actor = {
+        type: "board",
+        source: "local_implicit",
+        isInstanceAdmin: true,
+        userId: "user-1",
+        companyIds: ["company-1"],
+      };
+      next();
+    });
+    app.use(
+      "/api",
+      adapterRoutes({
+        buildCatalogContext: buildCtxSpy,
+      }),
+    );
+    app.use(errorHandler);
+
+    // Requesting config-schema for codex_local (which does not opt in to agent-scoped catalog)
+    // with nonexistent agentId should NOT call buildCatalogContext and should return 200 identically
+    const resWithoutParams = await request(app).get("/api/adapters/codex_local/config-schema");
+    const resWithParams = await request(app).get(
+      "/api/adapters/codex_local/config-schema?companyId=company-1&agentId=nonexistent-agent",
+    );
+
+    expect(resWithoutParams.status).toBe(200);
+    expect(resWithParams.status).toBe(200);
+    expect(resWithParams.body).toEqual(resWithoutParams.body);
+    expect(buildCtxSpy).not.toHaveBeenCalled();
+  });
 });

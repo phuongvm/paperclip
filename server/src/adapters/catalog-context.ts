@@ -147,6 +147,11 @@ export async function buildAdapterCatalogContext(
   },
   deps?: BuildAdapterCatalogContextDeps,
 ): Promise<AdapterCatalogContext | null> {
+  const adapter = findActiveServerAdapter(input.adapterType);
+  if (!adapter?.supportsAgentScopedCatalog) {
+    return null;
+  }
+
   const assertAccess = deps?.assertCompanyAccess ?? defaultAssertCompanyAccess;
   assertAccess(input.req, input.companyId);
 
@@ -170,16 +175,17 @@ export async function buildAdapterCatalogContext(
     await deps.assertCanReadAgentConfig(input.req, agent);
   }
 
-  const adapter = findActiveServerAdapter(input.adapterType);
-  if (!adapter?.supportsAgentScopedCatalog) {
-    return null;
-  }
-
   const rawConfig = parseObject(agent.adapterConfig);
   const targetInfo = normalizeGatewayTargetRootAndProfile(rawConfig);
   if (!targetInfo) {
     return null;
   }
+
+  const allowInsecureRemoteHttp =
+    rawConfig.dangerouslyAllowInsecureRemoteHttp === true ||
+    rawConfig.dangerouslyAllowInsecureRemoteHttp === "true" ||
+    rawConfig.dangerouslyAllowInsecureRemoteHttp === 1 ||
+    rawConfig.dangerouslyAllowInsecureRemoteHttp === "1";
 
   const { secretId, secretVersion } = extractSecretIdentity(
     rawConfig.apiKey ?? rawConfig.token,
@@ -222,6 +228,7 @@ export async function buildAdapterCatalogContext(
     apiBaseUrl: targetInfo.apiBaseUrl,
     ...(targetInfo.profile ? { profile: targetInfo.profile } : {}),
     ...(resolvedKey ? { authHeader: `Bearer ${resolvedKey}` } : {}),
+    ...(allowInsecureRemoteHttp ? { allowInsecureRemoteHttp: true } : {}),
     cacheKey,
   };
 }

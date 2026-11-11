@@ -999,6 +999,30 @@ describe("transition matrix", () => {
         resolvedFrom: "catalogMembership",
         warnings: ["hermes_model_ambiguous_legacy_composite"],
       });
+
+      // SP-01: Rule B decodes when provider is explicit 'auto' as well as omitted
+      const ruleBAutoCatalog = {
+        ...catalog,
+        defaultProvider: "ai-router",
+        modelsByProvider: {
+          "ai-router": ["native-a", "m"],
+          "headroom-proxy": ["native-b", "m"],
+        },
+      };
+      const ruleBAuto = resolveHermesInvocation({
+        configProvider: "auto",
+        configModel: "headroom-proxy/m",
+        catalog: ruleBAutoCatalog,
+        policy,
+      });
+      expect(ruleBAuto).toEqual({
+        ok: true,
+        provider: "headroom-proxy",
+        model: "m",
+        pinned: true,
+        resolvedFrom: "legacyComposite",
+        warnings: [],
+      });
     });
   });
 });

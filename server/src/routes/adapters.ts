@@ -806,7 +806,7 @@ export function adapterRoutes(options: {
     }
 
     let catalogCtx: import("../adapters/types.js").AdapterCatalogContext | null = null;
-    if (companyId && agentId) {
+    if (adapter.supportsAgentScopedCatalog && companyId && agentId) {
       const resolveCtx = options.buildCatalogContext ?? buildAdapterCatalogContext;
       catalogCtx = await resolveCtx({
         db: options.db,

@@ -176,17 +176,12 @@ export async function testEnvironment(
     });
   }
 
-  const hasSelectionConfig =
-    ctx.config.provider !== undefined ||
-    ctx.config.model !== undefined ||
-    Boolean(process.env.PAPERCLIP_HERMES_ALLOWED_PROVIDERS?.trim()) ||
-    Boolean(process.env.PAPERCLIP_HERMES_GATEWAY_URL?.trim());
-
-  if (hasSelectionConfig && !checks.some((c) => c.level === "error")) {
+  if (!checks.some((c) => c.level === "error")) {
     const catalogRes = await fetchGatewayModelOptionsCatalog({
       apiBaseUrl,
       profile: target.profile,
       authHeader: `Bearer ${apiKey}`,
+      allowInsecureRemoteHttp: allowsInsecureRemoteHttp(ctx.config),
     });
 
     if (catalogRes.failure?.reason === "unauthorized") {

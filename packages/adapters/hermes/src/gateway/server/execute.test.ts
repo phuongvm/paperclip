@@ -851,7 +851,15 @@ describe("gateway connection failure reporting", () => {
   it("classifies a network failure reading the create response without rewriting its error", async () => {
     const response = new Response("unread");
     vi.spyOn(response, "text").mockRejectedValue(new TypeError("terminated", { cause: { code: "UND_ERR_SOCKET" } }));
-    vi.stubGlobal("fetch", vi.fn(async () => response));
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+      if (String(input).includes("/api/model/options")) {
+        return new Response(JSON.stringify({ providers: [] }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      return response;
+    }));
     const result = await execute(makeCtx(config));
     expect(result).toMatchObject({ exitCode: 1, signal: null, timedOut: false,
       errorCode: "hermes_gateway_protocol_error", errorFamily: null, errorMessage: "terminated",
@@ -901,7 +909,15 @@ describe("gateway connection failure reporting", () => {
 
   it.each(["not json", JSON.stringify({ status: "running", connectionFailure: marker("create_run", "connection_refused") })])(
     "keeps malformed successful create responses reportable", async (body) => {
-      vi.stubGlobal("fetch", vi.fn(async () => new Response(body)));
+      vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+        if (String(input).includes("/api/model/options")) {
+          return new Response(JSON.stringify({ providers: [] }), {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          });
+        }
+        return new Response(body);
+      }));
       const result = await execute(makeCtx(config));
       expect(result.errorCode).toBe("hermes_gateway_protocol_error");
       expect(result.resultJson).toBeUndefined();
@@ -911,7 +927,15 @@ describe("gateway connection failure reporting", () => {
   it("does not classify a local response reader TypeError", async () => {
     const response = new Response("unread");
     vi.spyOn(response, "text").mockRejectedValue(new TypeError("cannot read property of undefined"));
-    vi.stubGlobal("fetch", vi.fn(async () => response));
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+      if (String(input).includes("/api/model/options")) {
+        return new Response(JSON.stringify({ providers: [] }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      return response;
+    }));
     const result = await execute(makeCtx(config));
     expect(result.errorCode).toBe("hermes_gateway_protocol_error");
     expect(result.resultJson).toBeUndefined();
@@ -943,6 +967,12 @@ describe("gateway connection failure reporting", () => {
 
   it("retains an ambiguous accepted-run timeout after stream, poll, and stop connection failures", async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      if (String(input).includes("/api/model/options")) {
+        return new Response(JSON.stringify({ providers: [] }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
       if (String(input).endsWith("/v1/runs")) return new Response(JSON.stringify({ run_id: "run-accepted" }));
       throw new TypeError("fetch failed", { cause: { code: "ECONNRESET" } });
     });
@@ -1413,5 +1443,34 @@ describe("S3 gateway URL normal form, profile validation, and buildRunSelection 
     expect(res.errorCode).toBe("hermes_effective_provider_unverified");
     expect(postRequests).toHaveLength(0);
   });
-});
 
+  it("enforces provider authorization and zero POSTs when provider and model fields are completely omitted (SP-03)", async () => {
+    const modelOptionsMod = await import("./model-options.js");
+    modelOptionsMod.resetGatewayCatalogCacheForTests?.();
+    process.env.PAPERCLIP_HERMES_ALLOWED_PROVIDERS = "ai-router,headroom-proxy";
+
+    const postRequests: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if ((init?.method ?? "GET") === "POST") {
+          postRequests.push(url);
+        }
+        return new Response("Service Unavailable", { status: 503 });
+      }),
+    );
+
+    // Omitted provider and omitted model under restrictive policy fails closed before POST
+    const res = await execute(
+      makeCtx({
+        apiBaseUrl: "http://127.0.0.1:8642",
+        apiKey: "secret-key",
+      }),
+    );
+
+    expect(res.exitCode).toBe(1);
+    expect(res.errorCode).toBe("hermes_effective_provider_unverified");
+    expect(postRequests).toHaveLength(0);
+  });
+});

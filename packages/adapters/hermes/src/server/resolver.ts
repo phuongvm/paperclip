@@ -229,7 +229,7 @@ export function resolveHermesInvocation(input: {
       };
     }
 
-    if (!rawProvider && ruleB) {
+    if ((!rawProvider || rawProvider === "auto") && ruleB) {
       return {
         ok: true,
         model: ruleB.model,

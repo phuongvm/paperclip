@@ -488,6 +488,7 @@ export interface AdapterCatalogContext {
   profile?: string;
   authHeader?: string;
   cacheKey: string;
+  allowInsecureRemoteHttp?: boolean;
 }
 
 export interface AdapterRuntimeCommandSpec {

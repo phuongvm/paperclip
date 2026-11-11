@@ -960,40 +960,79 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     };
   }
 
-  const rawPayloadTemplate = parseObject(ctx.config.payloadTemplate);
-  const hasSelectionConfig =
-    ctx.config.provider !== undefined ||
-    ctx.config.model !== undefined ||
-    rawPayloadTemplate.provider !== undefined ||
-    rawPayloadTemplate.model !== undefined ||
-    Boolean(process.env.PAPERCLIP_HERMES_ALLOWED_PROVIDERS?.trim()) ||
-    Boolean(process.env.PAPERCLIP_HERMES_GATEWAY_URL?.trim());
+  let redactText = createTextRedactor([apiKey, `Bearer ${apiKey}`]);
 
-  let runSelection:
-    | { provider?: string; model?: string; model_options?: Record<string, unknown> }
-    | undefined;
-  if (hasSelectionConfig) {
-    const catalogRes = await fetchGatewayModelOptionsCatalog({
-      apiBaseUrl: apiBaseUrlValue,
-      profile: target.profile,
-      authHeader: `Bearer ${apiKey}`,
-    });
-    const sel = buildRunSelection(ctx.config, catalogRes.parsed?.catalog ?? null);
-    if (!sel.ok) {
-      await ctx.onLog(
-        "stderr",
-        `[hermes-gateway] provider authorization failed: code=${sel.errorCode} provider=${sel.provider ?? "auto"} resolvedFrom=${sel.resolvedFrom ?? "unknown"}\n`,
-      );
-      return {
-        exitCode: 1,
-        signal: null,
-        timedOut: false,
-        errorCode: sel.errorCode,
-        errorMessage: `Hermes gateway provider validation failed (${sel.errorCode}${sel.provider ? `: ${sel.provider}` : ""}).`,
-      };
-    }
-    runSelection = sel.selection;
+  // This adapter has no local child process, so crossing into the first
+  // remote request is its dispatch boundary. Report it before the
+  // request can block so continuation gates may release their issue lock.
+  try {
+    ctx.onDispatch?.();
+  } catch (err) {
+    return errorResult(err, baseUrl, redactText);
   }
+
+  const catalogRes = await fetchGatewayModelOptionsCatalog({
+    apiBaseUrl: apiBaseUrlValue,
+    profile: target.profile,
+    authHeader: `Bearer ${apiKey}`,
+    allowInsecureRemoteHttp: allowsInsecureRemoteHttp(ctx.config),
+  });
+
+  const sel = buildRunSelection(ctx.config, catalogRes.parsed?.catalog ?? null);
+  if (!sel.ok) {
+    await ctx.onLog(
+      "stderr",
+      `[hermes-gateway] provider authorization failed: code=${sel.errorCode} provider=${sel.provider ?? "auto"} resolvedFrom=${sel.resolvedFrom ?? "unknown"}\n`,
+    );
+    return {
+      exitCode: 1,
+      signal: null,
+      timedOut: false,
+      errorCode: sel.errorCode,
+      errorMessage: `Hermes gateway provider validation failed (${sel.errorCode}${sel.provider ? `: ${sel.provider}` : ""}).`,
+    };
+  }
+
+  if (catalogRes.failure && !catalogRes.parsed) {
+    if (catalogRes.failure.reason === "network_error") {
+      const fetchErr = new Error(
+        `Hermes gateway request failed: ${fetchFailureMessage(catalogRes.failure.error)}`,
+      ) as HermesHttpError;
+      fetchErr.code = "hermes_gateway_connect_failed";
+      fetchErr.transportCause =
+        catalogRes.failure.error instanceof Error
+          ? (catalogRes.failure.error as any).cause
+          : undefined;
+      rememberNetworkFailure(fetchErr, catalogRes.failure.error);
+      return errorResult(fetchErr, baseUrl, redactText);
+    }
+    if (
+      catalogRes.failure.reason === "unauthorized" ||
+      catalogRes.failure.reason === "http_error"
+    ) {
+      const status =
+        catalogRes.failure.status ??
+        (catalogRes.failure.reason === "unauthorized" ? 401 : 500);
+      const classified = classifyHttpError(status);
+      const err = new Error(`Hermes gateway HTTP ${status}`) as HermesHttpError;
+      err.status = status;
+      err.code = classified.code;
+      err.retryNotBefore = catalogRes.failure.retryAfter;
+      err.body = catalogRes.failure.body;
+      const reason = httpFailureReason(status);
+      if (reason) {
+        requestConnectionFailures.set(err, {
+          schemaVersion: 1,
+          provider: "hermes_gateway",
+          operation: "create_run",
+          reason,
+        });
+      }
+      return errorResult(err, baseUrl, redactText);
+    }
+  }
+
+  const runSelection = sel.selection;
 
   const timeoutSec = parseNonNegativeNumber(ctx.config.timeoutSec, DEFAULT_TIMEOUT_SEC);
   const timeoutMs = timeoutSec > 0 ? Math.ceil(timeoutSec * 1000) : 0;
@@ -1023,7 +1062,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     extraHeaders,
     accept: "text/event-stream",
   });
-  const redactText = createTextRedactor([
+  redactText = createTextRedactor([
     apiKey,
     sessionKey,
     runHeaders.Authorization,
@@ -1050,10 +1089,6 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
 
   let runId: string | null = null;
   try {
-    // This adapter has no local child process, so crossing into the first
-    // remote create request is its dispatch boundary. Report it before the
-    // request can block so continuation gates may release their issue lock.
-    ctx.onDispatch?.();
     const created = await fetchJson(createRunUrl, {
       method: "POST",
       headers: runHeaders,

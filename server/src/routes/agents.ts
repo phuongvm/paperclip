@@ -3162,15 +3162,17 @@ export function agentRoutes(
       return;
     }
     const modelAgentId = asNonEmptyString(req.query.agentId);
-    const catalogCtx = modelAgentId
-      ? await buildAdapterCatalogContext({
-          db,
-          req,
-          companyId,
-          adapterType: modelAdapterType,
-          agentId: modelAgentId,
-        })
-      : null;
+    const targetAdapter = findActiveServerAdapter(modelAdapterType);
+    const catalogCtx =
+      modelAgentId && targetAdapter?.supportsAgentScopedCatalog
+        ? await buildAdapterCatalogContext({
+            db,
+            req,
+            companyId,
+            adapterType: modelAdapterType,
+            agentId: modelAgentId,
+          })
+        : null;
     const models = refresh
       ? await refreshAdapterModels(modelAdapterType, catalogCtx ?? undefined)
       : await listAdapterModels(modelAdapterType, catalogCtx ?? undefined);
